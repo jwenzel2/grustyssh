@@ -1,0 +1,16 @@
+/* GrustySSH custom styles */
+
+/* Terminal tabs */
+tabbar {
+    background-color: @headerbar_bg_color;
+}
+
+/* Connection list sidebar */
+.navigation-sidebar row {
+    min-height: 48px;
+}
+
+/* Terminal widget fills available space */
+vte-terminal {
+    padding: 4px;
+}
