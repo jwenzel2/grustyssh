@@ -117,6 +117,7 @@ pub fn create_terminal_tab(
             match event {
                 SshEvent::Connected => {
                     log::info!("SSH session connected");
+                    terminal_clone.grab_focus();
                 }
                 SshEvent::Data(data) => {
                     terminal_clone.feed(&data);
