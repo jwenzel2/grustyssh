@@ -116,6 +116,7 @@ pub fn build_window(app: &adw::Application, state: SharedState) -> adw::Applicat
     about_action.connect_activate(move |_, _| {
         let about = adw::AboutDialog::builder()
             .application_name("GrustySSH")
+            .application_icon("grustyssh")
             .version("0.1.0")
             .developer_name("GrustySSH Project")
             .comments("A GTK4/libadwaita SSH client with tabbed terminals")

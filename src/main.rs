@@ -49,6 +49,7 @@ fn main() {
 
     app.connect_startup(|_| {
         log::info!("GrustySSH starting up");
+        gtk::Window::set_default_icon_name("grustyssh");
     });
 
     app.connect_activate(move |app| {
