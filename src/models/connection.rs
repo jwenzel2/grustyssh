@@ -46,9 +46,7 @@ impl KeyAlgorithm {
         &[
             KeyAlgorithm::Ed25519,
             KeyAlgorithm::EcdsaNistP256,
-            KeyAlgorithm::RsaSha2_256,
             KeyAlgorithm::RsaSha2_512,
-            KeyAlgorithm::Rsa,
         ]
     }
 }

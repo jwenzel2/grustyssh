@@ -67,7 +67,7 @@ pub fn build_window(app: &adw::Application, state: SharedState) -> adw::Applicat
         .build();
 
     let content_page = adw::NavigationPage::builder()
-        .title("Terminal")
+        .title("Grustyssh")
         .child(&content_box)
         .build();
 

@@ -49,9 +49,7 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
     let algo_list = gtk::StringList::new(&[
         "Ed25519",
         "ECDSA NIST P-256",
-        "RSA SHA2-256",
         "RSA SHA2-512",
-        "RSA (legacy)",
     ]);
     algo_row.set_model(Some(&algo_list));
     gen_group.add(&algo_row);
@@ -168,9 +166,7 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
         let algorithm = match algo_idx {
             0 => KeyAlgorithm::Ed25519,
             1 => KeyAlgorithm::EcdsaNistP256,
-            2 => KeyAlgorithm::RsaSha2_256,
-            3 => KeyAlgorithm::RsaSha2_512,
-            4 => KeyAlgorithm::Rsa,
+            2 => KeyAlgorithm::RsaSha2_512,
             _ => KeyAlgorithm::Ed25519,
         };
 
