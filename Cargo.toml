@@ -1,6 +1,6 @@
 [package]
 name = "grustyssh"
-version = "0.1.2"
+version = "0.2.2"
 edition = "2021"
 description = "A GTK4/libadwaita SSH client with tabbed terminals"
 
@@ -13,6 +13,7 @@ vte4 = "0.9"
 # SSH
 russh = "0.46"
 russh-keys = "0.46"
+russh-sftp = "2"
 ssh-key = { version = "0.6", features = ["ed25519", "p256", "rsa", "crypto", "encryption", "std", "rand_core"] }
 
 # Async

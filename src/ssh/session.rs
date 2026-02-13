@@ -12,6 +12,84 @@ use crate::ssh::handler::ClientHandler;
 use crate::ssh::tunnel;
 use crate::storage::paths;
 
+/// Establish an authenticated SSH session. Returns the session handle.
+/// This is shared between terminal sessions and SFTP sessions.
+pub async fn establish_session(
+    profile: &ConnectionProfile,
+    password: Option<&Zeroizing<String>>,
+    key_passphrase: Option<&Zeroizing<String>>,
+    event_tx: async_channel::Sender<SshEvent>,
+) -> Result<client::Handle<ClientHandler>, AppError> {
+    let config = Arc::new(client::Config {
+        preferred: preferred_algorithms(),
+        ..Default::default()
+    });
+
+    let handler = ClientHandler::new(event_tx.clone());
+
+    let addr = format!("{}:{}", profile.hostname, profile.port);
+    let mut session = client::connect(config, &addr, handler)
+        .await
+        .map_err(|e| AppError::Connection(e.to_string()))?;
+
+    // Authenticate
+    let authenticated = match profile.auth_method {
+        AuthMethod::Password => {
+            let pw = password
+                .map(|p| p.as_str())
+                .ok_or_else(|| AppError::Auth("Password required".into()))?;
+            session
+                .authenticate_password(&profile.username, pw)
+                .await
+                .map_err(|e| AppError::Auth(e.to_string()))?
+        }
+        AuthMethod::PublicKey => {
+            let key_id = profile
+                .key_pair_id
+                .ok_or_else(|| AppError::Auth("No key pair selected".into()))?;
+            let key_path = paths::private_key_path(&key_id);
+            let key_pass = key_passphrase.map(|s| s.as_str());
+            let key_pair = russh_keys::load_secret_key(&key_path, key_pass)
+                .map_err(|e| AppError::Auth(e.to_string()))?;
+            session
+                .authenticate_publickey(&profile.username, Arc::new(key_pair))
+                .await
+                .map_err(|e| AppError::Auth(e.to_string()))?
+        }
+        AuthMethod::Both => {
+            let key_id = profile
+                .key_pair_id
+                .ok_or_else(|| AppError::Auth("No key pair selected".into()))?;
+            let key_path = paths::private_key_path(&key_id);
+            let key_pass = key_passphrase.map(|s| s.as_str());
+            let key_pair = russh_keys::load_secret_key(&key_path, key_pass)
+                .map_err(|e| AppError::Auth(e.to_string()))?;
+            let pk_ok = session
+                .authenticate_publickey(&profile.username, Arc::new(key_pair))
+                .await
+                .map_err(|e| AppError::Auth(e.to_string()))?;
+
+            if !pk_ok {
+                let pw = password
+                    .map(|p| p.as_str())
+                    .ok_or_else(|| AppError::Auth("Password required for fallback".into()))?;
+                session
+                    .authenticate_password(&profile.username, pw)
+                    .await
+                    .map_err(|e| AppError::Auth(e.to_string()))?
+            } else {
+                true
+            }
+        }
+    };
+
+    if !authenticated {
+        return Err(AppError::Auth("Authentication failed".into()));
+    }
+
+    Ok(session)
+}
+
 /// Spawn an SSH session task.  Returns the command sender for controlling the session.
 pub fn spawn_session(
     profile: ConnectionProfile,
@@ -41,74 +119,13 @@ async fn run_session(
     event_tx: async_channel::Sender<SshEvent>,
     cmd_rx: async_channel::Receiver<SshCommand>,
 ) -> Result<(), AppError> {
-    let config = Arc::new(client::Config {
-        preferred: preferred_algorithms(),
-        ..Default::default()
-    });
-
-    let handler = ClientHandler::new(event_tx.clone());
-    let _host_key_accepted = handler.host_key_accepted.clone();
-    let _host_key_notify = handler.host_key_notify.clone();
-
-    let addr = format!("{}:{}", profile.hostname, profile.port);
-    let mut session = client::connect(config, &addr, handler)
-        .await
-        .map_err(|e| AppError::Connection(e.to_string()))?;
-
-    // Authenticate
-    let authenticated = match profile.auth_method {
-        AuthMethod::Password => {
-            let pw = password
-                .as_deref()
-                .ok_or_else(|| AppError::Auth("Password required".into()))?;
-            session
-                .authenticate_password(&profile.username, pw)
-                .await
-                .map_err(|e| AppError::Auth(e.to_string()))?
-        }
-        AuthMethod::PublicKey => {
-            let key_id = profile
-                .key_pair_id
-                .ok_or_else(|| AppError::Auth("No key pair selected".into()))?;
-            let key_path = paths::private_key_path(&key_id);
-            let key_pass = key_passphrase.as_deref().map(|s| s.as_str());
-            let key_pair = russh_keys::load_secret_key(&key_path, key_pass)
-                .map_err(|e| AppError::Auth(e.to_string()))?;
-            session
-                .authenticate_publickey(&profile.username, Arc::new(key_pair))
-                .await
-                .map_err(|e| AppError::Auth(e.to_string()))?
-        }
-        AuthMethod::Both => {
-            let key_id = profile
-                .key_pair_id
-                .ok_or_else(|| AppError::Auth("No key pair selected".into()))?;
-            let key_path = paths::private_key_path(&key_id);
-            let key_pass = key_passphrase.as_deref().map(|s| s.as_str());
-            let key_pair = russh_keys::load_secret_key(&key_path, key_pass)
-                .map_err(|e| AppError::Auth(e.to_string()))?;
-            let pk_ok = session
-                .authenticate_publickey(&profile.username, Arc::new(key_pair))
-                .await
-                .map_err(|e| AppError::Auth(e.to_string()))?;
-
-            if !pk_ok {
-                let pw = password
-                    .as_deref()
-                    .ok_or_else(|| AppError::Auth("Password required for fallback".into()))?;
-                session
-                    .authenticate_password(&profile.username, pw)
-                    .await
-                    .map_err(|e| AppError::Auth(e.to_string()))?
-            } else {
-                true
-            }
-        }
-    };
-
-    if !authenticated {
-        return Err(AppError::Auth("Authentication failed".into()));
-    }
+    let session = establish_session(
+        &profile,
+        password.as_ref(),
+        key_passphrase.as_ref(),
+        event_tx.clone(),
+    )
+    .await?;
 
     let _ = event_tx.send(SshEvent::Connected).await;
 

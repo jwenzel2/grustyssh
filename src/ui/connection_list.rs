@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::app::SharedState;
 use crate::models::connection::{AuthMethod, ConnectionProfile};
 use crate::ui::connection_dialog;
+use crate::ui::sftp_tab;
 use crate::ui::terminal_tab;
 
 /// Build the sidebar connection list widget.
@@ -102,6 +103,13 @@ pub fn build_connection_list(
                     .activatable(true)
                     .build();
 
+                let sftp_btn = gtk::Button::builder()
+                    .icon_name("folder-symbolic")
+                    .tooltip_text("SFTP File Transfer")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat"])
+                    .build();
+
                 let connect_btn = gtk::Button::builder()
                     .icon_name("media-playback-start-symbolic")
                     .tooltip_text("Connect")
@@ -123,9 +131,95 @@ pub fn build_connection_list(
                     .css_classes(["flat"])
                     .build();
 
+                row.add_suffix(&sftp_btn);
                 row.add_suffix(&connect_btn);
                 row.add_suffix(&edit_btn);
                 row.add_suffix(&delete_btn);
+
+                // SFTP button
+                let profile_for_sftp = profile.clone();
+                let tab_view_sftp = tab_view_rc.clone();
+                let state_sftp = state.clone();
+                let window_sftp = window_rc.clone();
+                sftp_btn.connect_clicked(move |_| {
+                    let needs_password = matches!(
+                        profile_for_sftp.auth_method,
+                        AuthMethod::Password | AuthMethod::Both
+                    );
+
+                    let key_has_passphrase = if let Some(key_id) = profile_for_sftp.key_pair_id {
+                        let store = state_sftp.key_store.lock().unwrap();
+                        store.get(&key_id).map(|k| k.has_passphrase).unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    let profile_c = profile_for_sftp.clone();
+                    let tab_view_cc = tab_view_sftp.clone();
+
+                    if key_has_passphrase && needs_password {
+                        let window_c2 = window_sftp.clone();
+                        let profile_c2 = profile_c.clone();
+                        prompt_secret(
+                            &window_sftp,
+                            &format!("Key passphrase for {}", profile_c.name),
+                            "Enter the passphrase for your SSH key:",
+                            move |key_pass| {
+                                let key_passphrase = Some(Zeroizing::new(key_pass));
+                                let profile_c3 = profile_c2.clone();
+                                let tab_view_cc2 = tab_view_cc.clone();
+                                prompt_secret(
+                                    &window_c2,
+                                    &format!("Password for {}", profile_c2.name),
+                                    "Enter your SSH password:",
+                                    move |password| {
+                                        sftp_tab::create_sftp_tab(
+                                            &tab_view_cc2,
+                                            &profile_c3,
+                                            Some(Zeroizing::new(password)),
+                                            key_passphrase,
+                                        );
+                                    },
+                                );
+                            },
+                        );
+                    } else if key_has_passphrase {
+                        prompt_secret(
+                            &window_sftp,
+                            &format!("Key passphrase for {}", profile_c.name),
+                            "Enter the passphrase for your SSH key:",
+                            move |key_pass| {
+                                sftp_tab::create_sftp_tab(
+                                    &tab_view_cc,
+                                    &profile_c,
+                                    None,
+                                    Some(Zeroizing::new(key_pass)),
+                                );
+                            },
+                        );
+                    } else if needs_password {
+                        prompt_secret(
+                            &window_sftp,
+                            &format!("Password for {}", profile_c.name),
+                            "Enter your SSH password:",
+                            move |password| {
+                                sftp_tab::create_sftp_tab(
+                                    &tab_view_cc,
+                                    &profile_c,
+                                    Some(Zeroizing::new(password)),
+                                    None,
+                                );
+                            },
+                        );
+                    } else {
+                        sftp_tab::create_sftp_tab(
+                            &tab_view_cc,
+                            &profile_c,
+                            None,
+                            None,
+                        );
+                    }
+                });
 
                 // Connect button
                 let profile_for_connect = profile.clone();
