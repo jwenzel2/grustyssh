@@ -4,7 +4,7 @@ use gtk::glib;
 use libadwaita as adw;
 use zeroize::Zeroizing;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -66,6 +66,8 @@ pub fn create_sftp_tab(
     let remote_entries: Rc<RefCell<Vec<SftpEntry>>> = Rc::new(RefCell::new(Vec::new()));
     let remote_path: Rc<RefCell<String>> = Rc::new(RefCell::new(String::from(".")));
     let remote_pane = build_remote_pane(remote_path.clone(), remote_entries.clone());
+    wire_toggle_deselect_on_second_click(&local_pane.listbox);
+    wire_toggle_deselect_on_second_click(&remote_pane.listbox);
 
     paned.set_start_child(Some(&local_pane.container));
     paned.set_end_child(Some(&remote_pane.container));
@@ -94,8 +96,16 @@ pub fn create_sftp_tab(
         .build();
     download_btn.add_css_class("suggested-action");
 
+    let delete_btn = gtk::Button::builder()
+        .label("Delete Selected")
+        .tooltip_text("Delete selected local and remote files/directories")
+        .sensitive(false)
+        .build();
+    delete_btn.add_css_class("destructive-action");
+
     transfer_bar.append(&upload_btn);
     transfer_bar.append(&download_btn);
+    transfer_bar.append(&delete_btn);
     main_box.append(&transfer_bar);
 
     let page = tab_view.append(&main_box);
@@ -113,70 +123,50 @@ pub fn create_sftp_tab(
     );
 
     let cmd_tx_rc = Rc::new(cmd_tx);
+    let remote_connected = Rc::new(Cell::new(false));
 
     // Enable transfer buttons once connected
     let upload_btn_rc = upload_btn.clone();
     let download_btn_rc = download_btn.clone();
 
-    // Upload button handler
-    let cmd_tx_upload = cmd_tx_rc.clone();
-    let local_state_upload = local_state.clone();
-    let local_list_upload = local_pane.listbox.clone();
-    let remote_path_upload = remote_path.clone();
-    let cmd_tx_refresh_upload = cmd_tx_rc.clone();
+    let upload_action: Rc<dyn Fn()> = {
+        let local_list_upload = local_pane.listbox.clone();
+        let local_state_upload = local_state.clone();
+        let remote_path_upload = remote_path.clone();
+        let cmd_tx_upload = cmd_tx_rc.clone();
+        Rc::new(move || {
+            upload_selected_local_entry(
+                &local_list_upload,
+                local_state_upload.clone(),
+                remote_path_upload.clone(),
+                cmd_tx_upload.clone(),
+            );
+        })
+    };
+    let upload_action_btn = upload_action.clone();
     upload_btn.connect_clicked(move |_| {
-        let selected = local_list_upload.selected_row();
-        if let Some(row) = selected {
-            let name = get_row_name(&row);
-            if let Some(name) = name {
-                let local_path = local_state_upload.borrow().current_path.join(&name);
-                let rpath = remote_path_upload.borrow().clone();
-                let remote = format!("{}/{}", rpath, name);
-                let tx = (*cmd_tx_upload).clone();
-                let tx2 = (*cmd_tx_refresh_upload).clone();
-                let rpath2 = rpath.clone();
-                glib::spawn_future_local(async move {
-                    let _ = tx.send(SftpCommand::Upload {
-                        local: local_path,
-                        remote,
-                    }).await;
-                    // Refresh remote listing after upload
-                    let _ = tx2.send(SftpCommand::ListDir(rpath2)).await;
-                });
-            }
-        }
+        upload_action_btn();
     });
 
-    // Download button handler
-    let cmd_tx_download = cmd_tx_rc.clone();
-    let local_state_download = local_state.clone();
-    let remote_list_download = remote_pane.listbox.clone();
-    let remote_path_download = remote_path.clone();
-    let local_pane_refresh = local_pane.clone();
-    let local_state_refresh = local_state.clone();
+    let download_action: Rc<dyn Fn()> = {
+        let remote_list_download = remote_pane.listbox.clone();
+        let remote_path_download = remote_path.clone();
+        let local_state_download = local_state.clone();
+        let local_pane_refresh = local_pane.clone();
+        let cmd_tx_download = cmd_tx_rc.clone();
+        Rc::new(move || {
+            download_selected_remote_entry(
+                &remote_list_download,
+                remote_path_download.clone(),
+                local_state_download.clone(),
+                local_pane_refresh.clone(),
+                cmd_tx_download.clone(),
+            );
+        })
+    };
+    let download_action_btn = download_action.clone();
     download_btn.connect_clicked(move |_| {
-        let selected = remote_list_download.selected_row();
-        if let Some(row) = selected {
-            let name = get_row_name(&row);
-            if let Some(name) = name {
-                let rpath = remote_path_download.borrow().clone();
-                let remote = format!("{}/{}", rpath, name);
-                let local = local_state_download.borrow().current_path.clone();
-                let tx = (*cmd_tx_download).clone();
-                let ls = local_state_refresh.clone();
-                let lp = local_pane_refresh.clone();
-                glib::spawn_future_local(async move {
-                    let _ = tx.send(SftpCommand::Download {
-                        remote,
-                        local,
-                    }).await;
-                    // Small delay then refresh local listing
-                    glib::timeout_future(std::time::Duration::from_millis(500)).await;
-                    let path = ls.borrow().current_path.clone();
-                    refresh_local_listing(&lp, &path);
-                });
-            }
-        }
+        download_action_btn();
     });
 
     // Wire local pane navigation
@@ -190,19 +180,224 @@ pub fn create_sftp_tab(
         cmd_tx_rc.clone(),
     );
 
+    // Local pane right-click actions
+    let local_delete_action: Rc<dyn Fn()> = {
+        let local_list_delete = local_pane.listbox.clone();
+        let local_state_delete = local_state.clone();
+        let local_pane_delete = local_pane.clone();
+        let status_label_delete = status_label.clone();
+        Rc::new(move || {
+            delete_selected_local_entries(
+                &local_list_delete,
+                local_state_delete.clone(),
+                local_pane_delete.clone(),
+                status_label_delete.clone(),
+            );
+        })
+    };
+
+    let local_context_popover = gtk::Popover::builder()
+        .autohide(true)
+        .has_arrow(false)
+        .build();
+    local_context_popover.set_parent(&local_pane.listbox);
+
+    let local_context_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let local_context_upload_btn = gtk::Button::builder()
+        .label("Upload")
+        .halign(gtk::Align::Start)
+        .css_classes(["flat"])
+        .build();
+    let local_context_delete_btn = gtk::Button::builder()
+        .label("Delete")
+        .halign(gtk::Align::Start)
+        .css_classes(["flat", "destructive-action"])
+        .build();
+    local_context_box.append(&local_context_upload_btn);
+    local_context_box.append(&local_context_delete_btn);
+    local_context_popover.set_child(Some(&local_context_box));
+
+    let local_context_popover_upload = local_context_popover.clone();
+    let upload_action_context_local = upload_action.clone();
+    local_context_upload_btn.connect_clicked(move |_| {
+        local_context_popover_upload.popdown();
+        upload_action_context_local();
+    });
+
+    let local_context_popover_delete = local_context_popover.clone();
+    let local_delete_action_context = local_delete_action.clone();
+    local_context_delete_btn.connect_clicked(move |_| {
+        local_context_popover_delete.popdown();
+        local_delete_action_context();
+    });
+
+    let local_right_click = gtk::GestureClick::builder()
+        .button(3)
+        .build();
+    let local_list_rclick = local_pane.listbox.clone();
+    let local_context_popover_rclick = local_context_popover.clone();
+    let local_context_upload_btn_rclick = local_context_upload_btn.clone();
+    let local_context_delete_btn_rclick = local_context_delete_btn.clone();
+    let remote_connected_local_rclick = remote_connected.clone();
+    local_right_click.connect_pressed(move |_, _, x, y| {
+        let Some(row) = local_list_rclick.row_at_y(y as i32) else {
+            return;
+        };
+        local_list_rclick.select_row(Some(&row));
+
+        local_context_upload_btn_rclick
+            .set_sensitive(remote_connected_local_rclick.get() && !is_row_dir(&row));
+        local_context_delete_btn_rclick.set_sensitive(get_row_name(&row).is_some());
+
+        let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+        local_context_popover_rclick.set_pointing_to(Some(&rect));
+        local_context_popover_rclick.popup();
+    });
+    local_pane.listbox.add_controller(local_right_click);
+
+    // Remote pane delete action
+    let remote_delete_action: Rc<dyn Fn()> = {
+        let remote_list = remote_pane.listbox.clone();
+        let remote_path_delete = remote_path.clone();
+        let cmd_tx_delete = cmd_tx_rc.clone();
+        let remote_connected_delete = remote_connected.clone();
+        Rc::new(move || {
+            if !remote_connected_delete.get() {
+                return;
+            }
+            delete_selected_remote_entries(
+                &remote_list,
+                remote_path_delete.clone(),
+                cmd_tx_delete.clone(),
+            );
+        })
+    };
+
+    let delete_action_btn_local = local_delete_action.clone();
+    let delete_action_btn_remote = remote_delete_action.clone();
+    delete_btn.connect_clicked(move |_| {
+        delete_action_btn_local();
+        delete_action_btn_remote();
+    });
+
+    let delete_btn_selection = delete_btn.clone();
+    let local_list_selection = local_pane.listbox.clone();
+    let remote_list_selection = remote_pane.listbox.clone();
+    let remote_connected_selection = remote_connected.clone();
+    local_pane.listbox.connect_selected_rows_changed(move |_| {
+        update_delete_button_state(
+            &delete_btn_selection,
+            &local_list_selection,
+            &remote_list_selection,
+            remote_connected_selection.get(),
+        );
+    });
+
+    let delete_btn_selection = delete_btn.clone();
+    let local_list_selection = local_pane.listbox.clone();
+    let remote_list_selection = remote_pane.listbox.clone();
+    let remote_connected_selection = remote_connected.clone();
+    remote_pane.listbox.connect_selected_rows_changed(move |_| {
+        update_delete_button_state(
+            &delete_btn_selection,
+            &local_list_selection,
+            &remote_list_selection,
+            remote_connected_selection.get(),
+        );
+    });
+
+    // Remote pane right-click actions
+    let remote_context_popover = gtk::Popover::builder()
+        .autohide(true)
+        .has_arrow(false)
+        .build();
+    remote_context_popover.set_parent(&remote_pane.listbox);
+
+    let remote_context_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let remote_context_download_btn = gtk::Button::builder()
+        .label("Download")
+        .halign(gtk::Align::Start)
+        .css_classes(["flat"])
+        .build();
+    let remote_context_delete_btn = gtk::Button::builder()
+        .label("Delete Selected")
+        .halign(gtk::Align::Start)
+        .css_classes(["flat", "destructive-action"])
+        .build();
+    remote_context_box.append(&remote_context_download_btn);
+    remote_context_box.append(&remote_context_delete_btn);
+    remote_context_popover.set_child(Some(&remote_context_box));
+
+    let remote_context_popover_download = remote_context_popover.clone();
+    let download_action_context_remote = download_action.clone();
+    remote_context_download_btn.connect_clicked(move |_| {
+        remote_context_popover_download.popdown();
+        download_action_context_remote();
+    });
+
+    let remote_context_popover_delete = remote_context_popover.clone();
+    let delete_action_context = remote_delete_action.clone();
+    remote_context_delete_btn.connect_clicked(move |_| {
+        remote_context_popover_delete.popdown();
+        delete_action_context();
+    });
+
+    let right_click = gtk::GestureClick::builder()
+        .button(3)
+        .build();
+    let remote_list_rclick = remote_pane.listbox.clone();
+    let remote_context_popover_rclick = remote_context_popover.clone();
+    let remote_context_download_btn_rclick = remote_context_download_btn.clone();
+    let remote_context_delete_btn_rclick = remote_context_delete_btn.clone();
+    let remote_connected_rclick = remote_connected.clone();
+    right_click.connect_pressed(move |_, _, x, y| {
+        if !remote_connected_rclick.get() {
+            return;
+        }
+
+        let Some(row) = remote_list_rclick.row_at_y(y as i32) else {
+            return;
+        };
+
+        if !row.is_selected() {
+            remote_list_rclick.unselect_all();
+            remote_list_rclick.select_row(Some(&row));
+        }
+
+        let has_selected = !get_selected_row_names(&remote_list_rclick).is_empty();
+        remote_context_delete_btn_rclick.set_sensitive(has_selected);
+        remote_context_download_btn_rclick
+            .set_sensitive(can_download_selected_remote_entry(&remote_list_rclick));
+
+        let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+        remote_context_popover_rclick.set_pointing_to(Some(&rect));
+        remote_context_popover_rclick.popup();
+    });
+    remote_pane.listbox.add_controller(right_click);
+
     // Poll SFTP events
     let remote_pane_events = remote_pane.clone();
     let remote_path_events = remote_path.clone();
     let remote_entries_events = remote_entries.clone();
     let status_label_c = status_label.clone();
     let transfer_label_c = transfer_label.clone();
+    let delete_btn_c = delete_btn.clone();
+    let remote_connected_c = remote_connected.clone();
+    let local_list_events = local_pane.listbox.clone();
     glib::spawn_future_local(async move {
         while let Ok(event) = event_rx.recv().await {
             match event {
                 SftpEvent::Connected => {
+                    remote_connected_c.set(true);
                     status_label_c.set_label("Connected");
                     upload_btn_rc.set_sensitive(true);
                     download_btn_rc.set_sensitive(true);
+                    update_delete_button_state(
+                        &delete_btn_c,
+                        &local_list_events,
+                        &remote_pane_events.listbox,
+                        remote_connected_c.get(),
+                    );
                     // Request initial directory listing
                     let tx = (*cmd_tx_rc).clone();
                     let rp = remote_path_events.borrow().clone();
@@ -215,6 +410,12 @@ pub fn create_sftp_tab(
                     *remote_entries_events.borrow_mut() = entries.clone();
                     remote_pane_events.path_entry.set_text(&path);
                     populate_remote_listbox(&remote_pane_events.listbox, &entries);
+                    update_delete_button_state(
+                        &delete_btn_c,
+                        &local_list_events,
+                        &remote_pane_events.listbox,
+                        remote_connected_c.get(),
+                    );
                 }
                 SftpEvent::TransferProgress { name, bytes, total } => {
                     if total > 0 {
@@ -231,9 +432,16 @@ pub fn create_sftp_tab(
                     status_label_c.set_label(&format!("Error: {msg}"));
                 }
                 SftpEvent::Disconnected => {
+                    remote_connected_c.set(false);
                     status_label_c.set_label("Disconnected");
                     upload_btn_rc.set_sensitive(false);
                     download_btn_rc.set_sensitive(false);
+                    update_delete_button_state(
+                        &delete_btn_c,
+                        &local_list_events,
+                        &remote_pane_events.listbox,
+                        remote_connected_c.get(),
+                    );
                     break;
                 }
             }
@@ -396,7 +604,7 @@ fn build_remote_pane(
     container.append(&nav_bar);
 
     let listbox = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::Single)
+        .selection_mode(gtk::SelectionMode::Multiple)
         .build();
     listbox.add_css_class("sftp-file-list");
 
@@ -427,8 +635,8 @@ fn build_remote_pane(
 
 fn refresh_local_listing(pane: &PaneWidgets, path: &PathBuf) {
     // Clear existing entries
-    while let Some(child) = pane.listbox.first_child() {
-        pane.listbox.remove(&child);
+    while let Some(row) = pane.listbox.row_at_index(0) {
+        pane.listbox.remove(&row);
     }
 
     pane.path_entry.set_text(&path.to_string_lossy());
@@ -472,8 +680,8 @@ fn refresh_local_listing(pane: &PaneWidgets, path: &PathBuf) {
 }
 
 fn populate_remote_listbox(listbox: &gtk::ListBox, entries: &[SftpEntry]) {
-    while let Some(child) = listbox.first_child() {
-        listbox.remove(&child);
+    while let Some(row) = listbox.row_at_index(0) {
+        listbox.remove(&row);
     }
 
     if entries.is_empty() {
@@ -545,6 +753,198 @@ fn get_row_name(row: &gtk::ListBoxRow) -> Option<String> {
 
 fn is_row_dir(row: &gtk::ListBoxRow) -> bool {
     row.widget_name().starts_with("d:")
+}
+
+fn get_selected_row_names(listbox: &gtk::ListBox) -> Vec<String> {
+    listbox
+        .selected_rows()
+        .into_iter()
+        .filter_map(|row| get_row_name(&row))
+        .collect()
+}
+
+fn wire_toggle_deselect_on_second_click(listbox: &gtk::ListBox) {
+    let toggle_click = gtk::GestureClick::builder()
+        .button(1)
+        .build();
+    toggle_click.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let listbox_toggle = listbox.clone();
+    toggle_click.connect_pressed(move |gesture, n_press, _x, y| {
+        if n_press != 1 {
+            return;
+        }
+
+        let Some(row) = listbox_toggle.row_at_y(y as i32) else {
+            return;
+        };
+        if !row.is_selected() {
+            return;
+        }
+
+        listbox_toggle.unselect_row(&row);
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    listbox.add_controller(toggle_click);
+}
+
+fn join_remote_path(base: &str, name: &str) -> String {
+    if base == "/" {
+        format!("/{name}")
+    } else if base.ends_with('/') {
+        format!("{base}{name}")
+    } else {
+        format!("{base}/{name}")
+    }
+}
+
+fn update_delete_button_state(
+    delete_btn: &gtk::Button,
+    local_list: &gtk::ListBox,
+    remote_list: &gtk::ListBox,
+    connected: bool,
+) {
+    let has_local_selected = !local_list.selected_rows().is_empty();
+    let has_remote_selected = connected && !get_selected_row_names(remote_list).is_empty();
+    delete_btn.set_sensitive(has_local_selected || has_remote_selected);
+}
+
+fn upload_selected_local_entry(
+    local_list: &gtk::ListBox,
+    local_state: Rc<RefCell<LocalPaneState>>,
+    remote_path: Rc<RefCell<String>>,
+    cmd_tx: Rc<async_channel::Sender<SftpCommand>>,
+) {
+    let Some(row) = local_list.selected_row() else {
+        return;
+    };
+    if is_row_dir(&row) {
+        return;
+    }
+
+    let Some(name) = get_row_name(&row) else {
+        return;
+    };
+
+    let local_path = local_state.borrow().current_path.join(&name);
+    if !local_path.is_file() {
+        return;
+    }
+
+    let rpath = remote_path.borrow().clone();
+    let remote = join_remote_path(&rpath, &name);
+    let tx = (*cmd_tx).clone();
+    let tx_refresh = (*cmd_tx).clone();
+    glib::spawn_future_local(async move {
+        let _ = tx.send(SftpCommand::Upload {
+            local: local_path,
+            remote,
+        }).await;
+        let _ = tx_refresh.send(SftpCommand::ListDir(rpath)).await;
+    });
+}
+
+fn can_download_selected_remote_entry(remote_list: &gtk::ListBox) -> bool {
+    let selected = remote_list.selected_rows();
+    if selected.len() != 1 {
+        return false;
+    }
+    !is_row_dir(&selected[0])
+}
+
+fn download_selected_remote_entry(
+    remote_list: &gtk::ListBox,
+    remote_path: Rc<RefCell<String>>,
+    local_state: Rc<RefCell<LocalPaneState>>,
+    local_pane: PaneWidgets,
+    cmd_tx: Rc<async_channel::Sender<SftpCommand>>,
+) {
+    if !can_download_selected_remote_entry(remote_list) {
+        return;
+    }
+
+    let selected = remote_list.selected_rows();
+    let Some(row) = selected.first() else {
+        return;
+    };
+    let Some(name) = get_row_name(row) else {
+        return;
+    };
+
+    let rpath = remote_path.borrow().clone();
+    let remote = join_remote_path(&rpath, &name);
+    let local = local_state.borrow().current_path.clone();
+    let tx = (*cmd_tx).clone();
+    let ls = local_state.clone();
+    let lp = local_pane.clone();
+    glib::spawn_future_local(async move {
+        let _ = tx.send(SftpCommand::Download {
+            remote,
+            local,
+        }).await;
+        glib::timeout_future(std::time::Duration::from_millis(500)).await;
+        let path = ls.borrow().current_path.clone();
+        refresh_local_listing(&lp, &path);
+    });
+}
+
+fn delete_selected_remote_entries(
+    remote_list: &gtk::ListBox,
+    remote_path: Rc<RefCell<String>>,
+    cmd_tx: Rc<async_channel::Sender<SftpCommand>>,
+) {
+    let selected_names = get_selected_row_names(remote_list);
+    if selected_names.is_empty() {
+        return;
+    }
+
+    let current_path = remote_path.borrow().clone();
+    let tx = (*cmd_tx).clone();
+    glib::spawn_future_local(async move {
+        for name in selected_names {
+            let target = join_remote_path(&current_path, &name);
+            let _ = tx.send(SftpCommand::Remove(target)).await;
+        }
+        let _ = tx.send(SftpCommand::ListDir(current_path)).await;
+    });
+}
+
+fn delete_selected_local_entries(
+    local_list: &gtk::ListBox,
+    local_state: Rc<RefCell<LocalPaneState>>,
+    local_pane: PaneWidgets,
+    status_label: gtk::Label,
+) {
+    let selected_names: Vec<String> = local_list
+        .selected_rows()
+        .into_iter()
+        .filter_map(|row| get_row_name(&row))
+        .collect();
+
+    if selected_names.is_empty() {
+        return;
+    }
+
+    let current_path = local_state.borrow().current_path.clone();
+    let mut first_error: Option<String> = None;
+    for name in selected_names {
+        let target = current_path.join(&name);
+        let result = if target.is_dir() {
+            std::fs::remove_dir_all(&target)
+        } else {
+            std::fs::remove_file(&target)
+        };
+        if let Err(e) = result {
+            if first_error.is_none() {
+                first_error = Some(format!("Error deleting {}: {e}", target.display()));
+            }
+        }
+    }
+
+    refresh_local_listing(&local_pane, &current_path);
+    if let Some(msg) = first_error {
+        status_label.set_label(&msg);
+    }
 }
 
 fn format_size(bytes: u64) -> String {
@@ -629,7 +1029,7 @@ fn wire_remote_navigation(
         if is_row_dir(row) {
             if let Some(name) = get_row_name(row) {
                 let current = remote_path_activate.borrow().clone();
-                let new_path = format!("{}/{}", current, name);
+                let new_path = join_remote_path(&current, &name);
                 let tx = (*cmd_tx_activate).clone();
                 glib::spawn_future_local(async move {
                     let _ = tx.send(SftpCommand::ListDir(new_path)).await;
