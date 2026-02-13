@@ -2,6 +2,7 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
 use libadwaita as adw;
+use adw::prelude::*;
 use zeroize::Zeroizing;
 
 use std::cell::{Cell, RefCell};
@@ -9,7 +10,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::models::connection::ConnectionProfile;
-use crate::ssh::sftp::{SftpCommand, SftpEntry, SftpEvent};
+use crate::ssh::sftp::{
+    SftpCommand,
+    SftpConflictDecision,
+    SftpConflictDirection,
+    SftpConflictResponse,
+    SftpEntry,
+    SftpEvent,
+};
 
 /// Create a new SFTP file browser tab connected to the given profile.
 pub fn create_sftp_tab(
@@ -84,14 +92,14 @@ pub fn create_sftp_tab(
 
     let upload_btn = gtk::Button::builder()
         .label("Upload →")
-        .tooltip_text("Upload selected local file to remote directory")
+        .tooltip_text("Upload selected local file or directory to remote")
         .sensitive(false)
         .build();
     upload_btn.add_css_class("suggested-action");
 
     let download_btn = gtk::Button::builder()
         .label("← Download")
-        .tooltip_text("Download selected remote file to local directory")
+        .tooltip_text("Download selected remote file or directory to local")
         .sensitive(false)
         .build();
     download_btn.add_css_class("suggested-action");
@@ -195,6 +203,20 @@ pub fn create_sftp_tab(
             );
         })
     };
+    let local_rename_action: Rc<dyn Fn()> = {
+        let local_list_rename = local_pane.listbox.clone();
+        let local_state_rename = local_state.clone();
+        let local_pane_rename = local_pane.clone();
+        let status_label_rename = status_label.clone();
+        Rc::new(move || {
+            rename_selected_local_entry(
+                &local_list_rename,
+                local_state_rename.clone(),
+                local_pane_rename.clone(),
+                status_label_rename.clone(),
+            );
+        })
+    };
 
     let local_context_popover = gtk::Popover::builder()
         .autohide(true)
@@ -208,12 +230,18 @@ pub fn create_sftp_tab(
         .halign(gtk::Align::Start)
         .css_classes(["flat"])
         .build();
+    let local_context_rename_btn = gtk::Button::builder()
+        .label("Rename")
+        .halign(gtk::Align::Start)
+        .css_classes(["flat"])
+        .build();
     let local_context_delete_btn = gtk::Button::builder()
         .label("Delete")
         .halign(gtk::Align::Start)
         .css_classes(["flat", "destructive-action"])
         .build();
     local_context_box.append(&local_context_upload_btn);
+    local_context_box.append(&local_context_rename_btn);
     local_context_box.append(&local_context_delete_btn);
     local_context_popover.set_child(Some(&local_context_box));
 
@@ -222,6 +250,13 @@ pub fn create_sftp_tab(
     local_context_upload_btn.connect_clicked(move |_| {
         local_context_popover_upload.popdown();
         upload_action_context_local();
+    });
+
+    let local_context_popover_rename = local_context_popover.clone();
+    let local_rename_action_context = local_rename_action.clone();
+    local_context_rename_btn.connect_clicked(move |_| {
+        local_context_popover_rename.popdown();
+        local_rename_action_context();
     });
 
     let local_context_popover_delete = local_context_popover.clone();
@@ -237,6 +272,7 @@ pub fn create_sftp_tab(
     let local_list_rclick = local_pane.listbox.clone();
     let local_context_popover_rclick = local_context_popover.clone();
     let local_context_upload_btn_rclick = local_context_upload_btn.clone();
+    let local_context_rename_btn_rclick = local_context_rename_btn.clone();
     let local_context_delete_btn_rclick = local_context_delete_btn.clone();
     let remote_connected_local_rclick = remote_connected.clone();
     local_right_click.connect_pressed(move |_, _, x, y| {
@@ -246,7 +282,8 @@ pub fn create_sftp_tab(
         local_list_rclick.select_row(Some(&row));
 
         local_context_upload_btn_rclick
-            .set_sensitive(remote_connected_local_rclick.get() && !is_row_dir(&row));
+            .set_sensitive(remote_connected_local_rclick.get());
+        local_context_rename_btn_rclick.set_sensitive(get_row_name(&row).is_some());
         local_context_delete_btn_rclick.set_sensitive(get_row_name(&row).is_some());
 
         let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
@@ -269,6 +306,20 @@ pub fn create_sftp_tab(
                 &remote_list,
                 remote_path_delete.clone(),
                 cmd_tx_delete.clone(),
+            );
+        })
+    };
+    let remote_rename_action: Rc<dyn Fn()> = {
+        let remote_list_rename = remote_pane.listbox.clone();
+        let remote_path_rename = remote_path.clone();
+        let cmd_tx_rename = cmd_tx_rc.clone();
+        let remote_connected_rename = remote_connected.clone();
+        Rc::new(move || {
+            rename_selected_remote_entry(
+                &remote_list_rename,
+                remote_path_rename.clone(),
+                cmd_tx_rename.clone(),
+                remote_connected_rename.get(),
             );
         })
     };
@@ -319,12 +370,18 @@ pub fn create_sftp_tab(
         .halign(gtk::Align::Start)
         .css_classes(["flat"])
         .build();
+    let remote_context_rename_btn = gtk::Button::builder()
+        .label("Rename")
+        .halign(gtk::Align::Start)
+        .css_classes(["flat"])
+        .build();
     let remote_context_delete_btn = gtk::Button::builder()
         .label("Delete Selected")
         .halign(gtk::Align::Start)
         .css_classes(["flat", "destructive-action"])
         .build();
     remote_context_box.append(&remote_context_download_btn);
+    remote_context_box.append(&remote_context_rename_btn);
     remote_context_box.append(&remote_context_delete_btn);
     remote_context_popover.set_child(Some(&remote_context_box));
 
@@ -333,6 +390,13 @@ pub fn create_sftp_tab(
     remote_context_download_btn.connect_clicked(move |_| {
         remote_context_popover_download.popdown();
         download_action_context_remote();
+    });
+
+    let remote_context_popover_rename = remote_context_popover.clone();
+    let remote_rename_action_context = remote_rename_action.clone();
+    remote_context_rename_btn.connect_clicked(move |_| {
+        remote_context_popover_rename.popdown();
+        remote_rename_action_context();
     });
 
     let remote_context_popover_delete = remote_context_popover.clone();
@@ -348,6 +412,7 @@ pub fn create_sftp_tab(
     let remote_list_rclick = remote_pane.listbox.clone();
     let remote_context_popover_rclick = remote_context_popover.clone();
     let remote_context_download_btn_rclick = remote_context_download_btn.clone();
+    let remote_context_rename_btn_rclick = remote_context_rename_btn.clone();
     let remote_context_delete_btn_rclick = remote_context_delete_btn.clone();
     let remote_connected_rclick = remote_connected.clone();
     right_click.connect_pressed(move |_, _, x, y| {
@@ -367,7 +432,9 @@ pub fn create_sftp_tab(
         let has_selected = !get_selected_row_names(&remote_list_rclick).is_empty();
         remote_context_delete_btn_rclick.set_sensitive(has_selected);
         remote_context_download_btn_rclick
-            .set_sensitive(can_download_selected_remote_entry(&remote_list_rclick));
+            .set_sensitive(can_download_selected_remote_entries(&remote_list_rclick));
+        remote_context_rename_btn_rclick
+            .set_sensitive(can_rename_selected_remote_entry(&remote_list_rclick));
 
         let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
         remote_context_popover_rclick.set_pointing_to(Some(&rect));
@@ -384,6 +451,7 @@ pub fn create_sftp_tab(
     let delete_btn_c = delete_btn.clone();
     let remote_connected_c = remote_connected.clone();
     let local_list_events = local_pane.listbox.clone();
+    let conflict_anchor = main_box.clone();
     glib::spawn_future_local(async move {
         while let Ok(event) = event_rx.recv().await {
             match event {
@@ -427,6 +495,20 @@ pub fn create_sftp_tab(
                 }
                 SftpEvent::TransferComplete { name } => {
                     transfer_label_c.set_label(&format!("{name}: complete"));
+                }
+                SftpEvent::TransferConflict {
+                    path,
+                    direction,
+                    is_dir,
+                    response_tx,
+                } => {
+                    prompt_transfer_conflict_dialog(
+                        &conflict_anchor,
+                        &path,
+                        direction,
+                        is_dir,
+                        response_tx,
+                    );
                 }
                 SftpEvent::Error(msg) => {
                     status_label_c.set_label(&format!("Error: {msg}"));
@@ -522,6 +604,7 @@ fn build_local_pane(state: Rc<RefCell<LocalPaneState>>) -> PaneWidgets {
     let listbox = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
         .build();
+    listbox.set_activate_on_single_click(false);
     listbox.add_css_class("sftp-file-list");
 
     let scrolled = gtk::ScrolledWindow::builder()
@@ -606,6 +689,7 @@ fn build_remote_pane(
     let listbox = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Multiple)
         .build();
+    listbox.set_activate_on_single_click(false);
     listbox.add_css_class("sftp-file-list");
 
     // Placeholder
@@ -809,6 +893,143 @@ fn update_delete_button_state(
     delete_btn.set_sensitive(has_local_selected || has_remote_selected);
 }
 
+fn prompt_transfer_conflict_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    path: &str,
+    direction: SftpConflictDirection,
+    is_dir: bool,
+    response_tx: async_channel::Sender<SftpConflictResponse>,
+) {
+    let item_type = if is_dir { "folder" } else { "file" };
+    let transfer_direction = match direction {
+        SftpConflictDirection::Upload => "uploading to remote",
+        SftpConflictDirection::Download => "downloading to local",
+    };
+
+    let dialog = adw::AlertDialog::builder()
+        .heading("Conflict Detected")
+        .body(&format!(
+            "A {item_type} already exists while {transfer_direction}:\n{path}\n\nChoose which version to keep."
+        ))
+        .build();
+
+    dialog.add_response("keep", "Keep Existing");
+    dialog.add_response("replace", "Keep Incoming");
+    dialog.set_response_appearance("replace", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("keep"));
+
+    let apply_all_check = gtk::CheckButton::builder()
+        .label("Apply this choice to all remaining conflicts in this transfer")
+        .halign(gtk::Align::Start)
+        .build();
+    dialog.set_extra_child(Some(&apply_all_check));
+
+    let response_tx_dialog = response_tx.clone();
+    let apply_all_check_dialog = apply_all_check.clone();
+    dialog.connect_response(None, move |_dialog, response| {
+        let decision = if response == "replace" {
+            SftpConflictDecision::ReplaceWithIncoming
+        } else {
+            SftpConflictDecision::KeepExisting
+        };
+        let response_payload = SftpConflictResponse {
+            decision,
+            apply_to_all: apply_all_check_dialog.is_active(),
+        };
+        let tx = response_tx_dialog.clone();
+        glib::spawn_future_local(async move {
+            let _ = tx.send(response_payload).await;
+        });
+    });
+
+    if let Some(root) = anchor.as_ref().root() {
+        if let Ok(window) = root.downcast::<gtk::Window>() {
+            dialog.present(Some(&window));
+            return;
+        }
+    }
+
+    glib::spawn_future_local(async move {
+        let _ = response_tx.send(SftpConflictResponse {
+            decision: SftpConflictDecision::KeepExisting,
+            apply_to_all: false,
+        }).await;
+    });
+}
+
+fn prompt_rename_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    current_name: &str,
+    on_submit: impl FnOnce(String) + 'static,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading("Rename")
+        .body("Enter a new name")
+        .build();
+
+    let entry = gtk::Entry::builder()
+        .text(current_name)
+        .build();
+    entry.select_region(0, -1);
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("rename", "Rename");
+    dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("rename"));
+
+    let on_submit = RefCell::new(Some(on_submit));
+    let entry_response = entry.clone();
+    dialog.connect_response(None, move |_dialog, response| {
+        if response == "rename" {
+            if let Some(callback) = on_submit.borrow_mut().take() {
+                callback(entry_response.text().to_string());
+            }
+        }
+    });
+
+    if let Some(root) = anchor.as_ref().root() {
+        if let Ok(window) = root.downcast::<gtk::Window>() {
+            dialog.present(Some(&window));
+        }
+    }
+}
+
+fn rename_selected_local_entry(
+    local_list: &gtk::ListBox,
+    local_state: Rc<RefCell<LocalPaneState>>,
+    local_pane: PaneWidgets,
+    status_label: gtk::Label,
+) {
+    let Some(row) = local_list.selected_row() else {
+        return;
+    };
+    let Some(old_name) = get_row_name(&row) else {
+        return;
+    };
+
+    let current_path = local_state.borrow().current_path.clone();
+    let local_pane_rename = local_pane.clone();
+    let status_label_rename = status_label.clone();
+    let old_name_prompt = old_name.clone();
+    prompt_rename_dialog(local_list, &old_name_prompt, move |new_name| {
+        let trimmed = new_name.trim().to_string();
+        if trimmed.is_empty() || trimmed == old_name {
+            return;
+        }
+
+        let from = current_path.join(&old_name);
+        let to = current_path.join(&trimmed);
+        match std::fs::rename(&from, &to) {
+            Ok(_) => refresh_local_listing(&local_pane_rename, &current_path),
+            Err(e) => status_label_rename.set_label(&format!(
+                "Error renaming {} to {}: {e}",
+                from.display(),
+                to.display(),
+            )),
+        }
+    });
+}
+
 fn upload_selected_local_entry(
     local_list: &gtk::ListBox,
     local_state: Rc<RefCell<LocalPaneState>>,
@@ -818,16 +1039,13 @@ fn upload_selected_local_entry(
     let Some(row) = local_list.selected_row() else {
         return;
     };
-    if is_row_dir(&row) {
-        return;
-    }
 
     let Some(name) = get_row_name(&row) else {
         return;
     };
 
     let local_path = local_state.borrow().current_path.join(&name);
-    if !local_path.is_file() {
+    if !local_path.exists() {
         return;
     }
 
@@ -844,12 +1062,53 @@ fn upload_selected_local_entry(
     });
 }
 
-fn can_download_selected_remote_entry(remote_list: &gtk::ListBox) -> bool {
-    let selected = remote_list.selected_rows();
-    if selected.len() != 1 {
-        return false;
+fn can_download_selected_remote_entries(remote_list: &gtk::ListBox) -> bool {
+    !remote_list.selected_rows().is_empty()
+}
+
+fn can_rename_selected_remote_entry(remote_list: &gtk::ListBox) -> bool {
+    remote_list.selected_rows().len() == 1
+}
+
+fn rename_selected_remote_entry(
+    remote_list: &gtk::ListBox,
+    remote_path: Rc<RefCell<String>>,
+    cmd_tx: Rc<async_channel::Sender<SftpCommand>>,
+    connected: bool,
+) {
+    if !connected || !can_rename_selected_remote_entry(remote_list) {
+        return;
     }
-    !is_row_dir(&selected[0])
+
+    let selected_rows = remote_list.selected_rows();
+    let Some(row) = selected_rows.first() else {
+        return;
+    };
+    let Some(old_name) = get_row_name(row) else {
+        return;
+    };
+
+    let current_path = remote_path.borrow().clone();
+    let cmd_tx_rename = cmd_tx.clone();
+    let old_name_prompt = old_name.clone();
+    prompt_rename_dialog(remote_list, &old_name_prompt, move |new_name| {
+        let trimmed = new_name.trim().to_string();
+        if trimmed.is_empty() || trimmed == old_name {
+            return;
+        }
+
+        let from = join_remote_path(&current_path, &old_name);
+        let to = join_remote_path(&current_path, &trimmed);
+        let refresh_path = current_path.clone();
+        let tx = (*cmd_tx_rename).clone();
+        glib::spawn_future_local(async move {
+            let _ = tx.send(SftpCommand::Rename {
+                from,
+                to,
+            }).await;
+            let _ = tx.send(SftpCommand::ListDir(refresh_path)).await;
+        });
+    });
 }
 
 fn download_selected_remote_entry(
@@ -859,29 +1118,27 @@ fn download_selected_remote_entry(
     local_pane: PaneWidgets,
     cmd_tx: Rc<async_channel::Sender<SftpCommand>>,
 ) {
-    if !can_download_selected_remote_entry(remote_list) {
+    if !can_download_selected_remote_entries(remote_list) {
         return;
     }
 
-    let selected = remote_list.selected_rows();
-    let Some(row) = selected.first() else {
+    let selected_names = get_selected_row_names(remote_list);
+    if selected_names.is_empty() {
         return;
-    };
-    let Some(name) = get_row_name(row) else {
-        return;
-    };
-
+    }
     let rpath = remote_path.borrow().clone();
-    let remote = join_remote_path(&rpath, &name);
     let local = local_state.borrow().current_path.clone();
     let tx = (*cmd_tx).clone();
     let ls = local_state.clone();
     let lp = local_pane.clone();
     glib::spawn_future_local(async move {
-        let _ = tx.send(SftpCommand::Download {
-            remote,
-            local,
-        }).await;
+        for name in selected_names {
+            let remote = join_remote_path(&rpath, &name);
+            let _ = tx.send(SftpCommand::Download {
+                remote,
+                local: local.clone(),
+            }).await;
+        }
         glib::timeout_future(std::time::Duration::from_millis(500)).await;
         let path = ls.borrow().current_path.clone();
         refresh_local_listing(&lp, &path);
