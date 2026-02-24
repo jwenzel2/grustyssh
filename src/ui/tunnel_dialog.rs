@@ -86,6 +86,20 @@ pub fn show_tunnel_dialog(
     toolbar_view.set_content(Some(&group));
     dialog.set_child(Some(&toolbar_view));
 
+    // Enter key in entry rows triggers save
+    {
+        let btn = save_btn.clone();
+        name_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+    {
+        let btn = save_btn.clone();
+        local_host_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+    {
+        let btn = save_btn.clone();
+        remote_host_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+
     let dialog_clone = dialog.clone();
     save_btn.connect_clicked(move |_| {
         let name = name_row.text().to_string();

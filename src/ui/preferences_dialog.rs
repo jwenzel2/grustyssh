@@ -76,6 +76,16 @@ pub fn show_preferences_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
     toolbar_view.set_content(Some(&group));
     dialog.set_child(Some(&toolbar_view));
 
+    // Enter key in entry rows triggers save
+    {
+        let btn = save_btn.clone();
+        font_family_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+    {
+        let btn = save_btn.clone();
+        term_type_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+
     let state_clone = state.clone();
     let dialog_clone = dialog.clone();
     save_btn.connect_clicked(move |_| {

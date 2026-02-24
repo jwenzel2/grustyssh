@@ -213,6 +213,20 @@ pub fn show_connection_dialog(
     toolbar_view.set_content(Some(&scrolled));
     dialog.set_child(Some(&toolbar_view));
 
+    // Enter key in entry rows triggers save
+    {
+        let btn = save_btn.clone();
+        name_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+    {
+        let btn = save_btn.clone();
+        host_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+    {
+        let btn = save_btn.clone();
+        user_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+
     // Save button handler
     let dialog_clone = dialog.clone();
     let key_ids_clone = key_ids.clone();

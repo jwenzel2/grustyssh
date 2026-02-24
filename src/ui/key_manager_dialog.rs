@@ -182,6 +182,16 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
     toolbar_view.set_content(Some(&scrolled));
     dialog.set_child(Some(&toolbar_view));
 
+    // Enter key in entry rows triggers generate
+    {
+        let btn = generate_btn.clone();
+        name_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+    {
+        let btn = generate_btn.clone();
+        passphrase_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+
     // Generate button handler
     let state_for_gen = state.clone();
     let name_row_clone = name_row.clone();
