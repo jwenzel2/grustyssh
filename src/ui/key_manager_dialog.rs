@@ -20,6 +20,18 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
 
     let toolbar_view = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
+
+    let backup_btn = gtk::Button::builder()
+        .icon_name("document-save-symbolic")
+        .tooltip_text("Backup all keys")
+        .build();
+    let restore_btn = gtk::Button::builder()
+        .icon_name("document-open-symbolic")
+        .tooltip_text("Restore keys from backup")
+        .build();
+    header.pack_end(&backup_btn);
+    header.pack_end(&restore_btn);
+
     toolbar_view.add_top_bar(&header);
 
     let content_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -192,6 +204,106 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
                 log::error!("Key generation failed: {e}");
             }
         }
+    });
+
+    // Backup button handler
+    let state_for_backup = state.clone();
+    let parent_for_backup = parent.clone();
+    backup_btn.connect_clicked(move |_| {
+        let backup_json = {
+            let store = state_for_backup.key_store.lock().unwrap();
+            store.export_backup()
+        };
+        match backup_json {
+            Ok(json) => {
+                let file_dialog = gtk::FileDialog::builder()
+                    .title("Save Key Backup")
+                    .initial_name("grustyssh-keys-backup.json")
+                    .build();
+                let parent_clone = parent_for_backup.clone();
+                file_dialog.save(
+                    Some(&parent_for_backup),
+                    gtk::gio::Cancellable::NONE,
+                    move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                if let Err(e) = std::fs::write(&path, &json) {
+                                    log::error!("Failed to write backup: {e}");
+                                } else {
+                                    let alert = adw::AlertDialog::builder()
+                                        .heading("Backup Saved")
+                                        .body(format!("Keys backed up to {}", path.display()))
+                                        .build();
+                                    alert.add_response("ok", "OK");
+                                    alert.present(Some(&parent_clone));
+                                }
+                            }
+                        }
+                    },
+                );
+            }
+            Err(e) => log::error!("Failed to export keys: {e}"),
+        }
+    });
+
+    // Restore button handler
+    let state_for_restore = state.clone();
+    let parent_for_restore = parent.clone();
+    let rebuild_for_restore = rebuild_key_list.clone();
+    restore_btn.connect_clicked(move |_| {
+        let filter = gtk::FileFilter::new();
+        filter.add_pattern("*.json");
+        filter.set_name(Some("JSON Backup Files"));
+        let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+
+        let file_dialog = gtk::FileDialog::builder()
+            .title("Restore Keys from Backup")
+            .filters(&filters)
+            .build();
+
+        let state_clone = state_for_restore.clone();
+        let parent_clone = parent_for_restore.clone();
+        let rebuild = rebuild_for_restore.clone();
+        file_dialog.open(
+            Some(&parent_for_restore),
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        match std::fs::read_to_string(&path) {
+                            Ok(json) => {
+                                let import_result = {
+                                    let mut store = state_clone.key_store.lock().unwrap();
+                                    store.import_backup(&json)
+                                };
+                                match import_result {
+                                    Ok(count) => {
+                                        rebuild();
+                                        let alert = adw::AlertDialog::builder()
+                                            .heading("Restore Complete")
+                                            .body(format!("Imported {count} key(s)."))
+                                            .build();
+                                        alert.add_response("ok", "OK");
+                                        alert.present(Some(&parent_clone));
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to import backup: {e}");
+                                        let alert = adw::AlertDialog::builder()
+                                            .heading("Restore Failed")
+                                            .body(format!("{e}"))
+                                            .build();
+                                        alert.add_response("ok", "OK");
+                                        alert.present(Some(&parent_clone));
+                                    }
+                                }
+                            }
+                            Err(e) => log::error!("Failed to read backup file: {e}"),
+                        }
+                    }
+                }
+            },
+        );
     });
 
     dialog.present(Some(parent));

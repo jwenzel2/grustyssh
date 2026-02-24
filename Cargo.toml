@@ -1,6 +1,6 @@
 [package]
 name = "grustyssh"
-version = "0.2.5"
+version = "1.0.0"
 edition = "2021"
 description = "A GTK4/libadwaita SSH client with tabbed terminals"
 
