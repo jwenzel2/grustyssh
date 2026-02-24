@@ -89,10 +89,13 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
     let state_clone = state.clone();
     let keys_listbox_rc = Rc::new(RefCell::new(keys_listbox.clone()));
 
+    let rebuild_fn: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+
     let rebuild_key_list = {
         let state = state_clone.clone();
         let keys_listbox_rc = keys_listbox_rc.clone();
         let _keys_group_ref = keys_group.clone();
+        let rebuild_fn = rebuild_fn.clone();
         move || {
             let listbox = keys_listbox_rc.borrow();
             // Remove all rows
@@ -143,6 +146,20 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
                         .css_classes(["flat", "destructive-action"])
                         .build();
 
+                    let state_for_delete = state.clone();
+                    let rebuild_ref = rebuild_fn.clone();
+                    delete_btn.connect_clicked(move |_| {
+                        {
+                            let mut store = state_for_delete.key_store.lock().unwrap();
+                            if let Err(e) = store.remove(&key_id) {
+                                log::error!("Failed to delete key: {e}");
+                            }
+                        }
+                        if let Some(f) = rebuild_ref.borrow().as_ref() {
+                            f();
+                        }
+                    });
+
                     row.add_suffix(&export_btn);
                     row.add_suffix(&delete_btn);
                     listbox.append(&row);
@@ -150,6 +167,8 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
             }
         }
     };
+
+    *rebuild_fn.borrow_mut() = Some(Box::new(rebuild_key_list.clone()));
 
     rebuild_key_list();
 

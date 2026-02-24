@@ -1,5 +1,5 @@
 Name:           grustyssh
-Version:        1.0.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        A GTK4/libadwaita SSH client with tabbed terminals
 
