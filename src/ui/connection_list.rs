@@ -41,8 +41,22 @@ pub fn build_connection_list(
         .css_classes(["flat"])
         .build();
 
+    let backup_btn = gtk::Button::builder()
+        .icon_name("document-save-symbolic")
+        .tooltip_text("Backup connections")
+        .css_classes(["flat"])
+        .build();
+
+    let restore_btn = gtk::Button::builder()
+        .icon_name("document-open-symbolic")
+        .tooltip_text("Restore connections")
+        .css_classes(["flat"])
+        .build();
+
     list_header.append(&title_label);
     list_header.append(&add_btn);
+    list_header.append(&backup_btn);
+    list_header.append(&restore_btn);
     sidebar_box.append(&list_header);
 
     let listbox = gtk::ListBox::builder()
@@ -379,6 +393,106 @@ pub fn build_connection_list(
                 let _ = store.add(profile);
                 drop(store);
                 rebuild_c();
+            },
+        );
+    });
+
+    // Backup button
+    let state_for_backup = state.clone();
+    let window_for_backup = window.clone();
+    backup_btn.connect_clicked(move |_| {
+        let backup_json = {
+            let store = state_for_backup.profile_store.lock().unwrap();
+            store.export_backup()
+        };
+        match backup_json {
+            Ok(json) => {
+                let file_dialog = gtk::FileDialog::builder()
+                    .title("Save Connections Backup")
+                    .initial_name("grustyssh-connections-backup.json")
+                    .build();
+                let parent_clone = window_for_backup.clone();
+                file_dialog.save(
+                    Some(&window_for_backup),
+                    gtk::gio::Cancellable::NONE,
+                    move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                if let Err(e) = std::fs::write(&path, &json) {
+                                    log::error!("Failed to write backup: {e}");
+                                } else {
+                                    let alert = adw::AlertDialog::builder()
+                                        .heading("Backup Saved")
+                                        .body(format!("Connections backed up to {}", path.display()))
+                                        .build();
+                                    alert.add_response("ok", "OK");
+                                    alert.present(Some(&parent_clone));
+                                }
+                            }
+                        }
+                    },
+                );
+            }
+            Err(e) => log::error!("Failed to export connections: {e}"),
+        }
+    });
+
+    // Restore button
+    let state_for_restore = state.clone();
+    let window_for_restore = window.clone();
+    let rebuild_for_restore = rebuild.clone();
+    restore_btn.connect_clicked(move |_| {
+        let filter = gtk::FileFilter::new();
+        filter.add_pattern("*.json");
+        filter.set_name(Some("JSON Backup Files"));
+        let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+
+        let file_dialog = gtk::FileDialog::builder()
+            .title("Restore Connections from Backup")
+            .filters(&filters)
+            .build();
+
+        let state_clone = state_for_restore.clone();
+        let parent_clone = window_for_restore.clone();
+        let rebuild = rebuild_for_restore.clone();
+        file_dialog.open(
+            Some(&window_for_restore),
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        match std::fs::read_to_string(&path) {
+                            Ok(json) => {
+                                let import_result = {
+                                    let mut store = state_clone.profile_store.lock().unwrap();
+                                    store.import_backup(&json)
+                                };
+                                match import_result {
+                                    Ok(count) => {
+                                        rebuild();
+                                        let alert = adw::AlertDialog::builder()
+                                            .heading("Restore Complete")
+                                            .body(format!("Imported {count} connection(s)."))
+                                            .build();
+                                        alert.add_response("ok", "OK");
+                                        alert.present(Some(&parent_clone));
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to import backup: {e}");
+                                        let alert = adw::AlertDialog::builder()
+                                            .heading("Restore Failed")
+                                            .body(format!("{e}"))
+                                            .build();
+                                        alert.add_response("ok", "OK");
+                                        alert.present(Some(&parent_clone));
+                                    }
+                                }
+                            }
+                            Err(e) => log::error!("Failed to read backup file: {e}"),
+                        }
+                    }
+                }
             },
         );
     });

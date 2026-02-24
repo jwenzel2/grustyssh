@@ -1,8 +1,15 @@
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
 use crate::config;
 use crate::error::AppError;
 use crate::models::connection::ConnectionProfile;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProfileBackup {
+    pub version: u32,
+    pub profiles: Vec<ConnectionProfile>,
+}
 
 #[derive(Debug)]
 pub struct ProfileStore {
@@ -54,5 +61,27 @@ impl ProfileStore {
 
     pub fn get(&self, id: &Uuid) -> Option<&ConnectionProfile> {
         self.profiles.iter().find(|p| &p.id == id)
+    }
+
+    pub fn export_backup(&self) -> Result<String, AppError> {
+        Ok(serde_json::to_string_pretty(&ProfileBackup {
+            version: 1,
+            profiles: self.profiles.clone(),
+        })?)
+    }
+
+    pub fn import_backup(&mut self, json: &str) -> Result<usize, AppError> {
+        let backup: ProfileBackup = serde_json::from_str(json)
+            .map_err(|e| AppError::Other(format!("Invalid backup file: {e}")))?;
+        let mut imported = 0;
+        for profile in backup.profiles {
+            if self.profiles.iter().any(|p| p.id == profile.id) {
+                continue;
+            }
+            self.profiles.push(profile);
+            imported += 1;
+        }
+        self.save()?;
+        Ok(imported)
     }
 }
