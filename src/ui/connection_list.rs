@@ -522,8 +522,21 @@ fn prompt_secret(
     dialog.set_response_appearance("connect", adw::ResponseAppearance::Suggested);
     dialog.set_default_response(Some("connect"));
 
-    // Wrap FnOnce in RefCell<Option<>> so it can be called from the Fn closure
-    let on_submit = RefCell::new(Some(on_submit));
+    // Wrap FnOnce in Rc<RefCell<Option<>>> so it can be shared between closures
+    let on_submit: Rc<RefCell<Option<Box<dyn FnOnce(String) + 'static>>>> =
+        Rc::new(RefCell::new(Some(Box::new(on_submit))));
+
+    // Enter key in the password field triggers connect
+    let dialog_for_entry = dialog.clone();
+    let on_submit_for_entry = on_submit.clone();
+    let entry_for_activate = entry.clone();
+    entry.connect_activate(move |_| {
+        if let Some(callback) = on_submit_for_entry.borrow_mut().take() {
+            callback(entry_for_activate.text().to_string());
+        }
+        dialog_for_entry.close();
+    });
+
     let entry_clone = entry.clone();
     dialog.connect_response(None, move |_dialog, response| {
         if response == "connect" {
