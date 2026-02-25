@@ -35,12 +35,16 @@ pub fn create_terminal_tab(
         apply_terminal_settings(&terminal, &settings);
     }
 
-    // Right-click = copy selection to clipboard (PuTTY style)
+    // Right-click = copy if selection exists, paste if nothing selected (PuTTY style)
     let gesture_click = gtk::GestureClick::new();
     gesture_click.set_button(gtk::gdk::BUTTON_SECONDARY);
     let term_for_rclick = terminal.clone();
     gesture_click.connect_pressed(move |gesture, _n_press, _x, _y| {
-        term_for_rclick.copy_clipboard_format(vte4::Format::Text);
+        if term_for_rclick.has_selection() {
+            term_for_rclick.copy_clipboard_format(vte4::Format::Text);
+        } else {
+            term_for_rclick.paste_clipboard();
+        }
         gesture.set_state(gtk::EventSequenceState::Claimed);
     });
     terminal.add_controller(gesture_click);
