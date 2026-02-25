@@ -35,6 +35,16 @@ pub fn create_terminal_tab(
         apply_terminal_settings(&terminal, &settings);
     }
 
+    // Right-click = copy selection to clipboard (PuTTY style)
+    let gesture_click = gtk::GestureClick::new();
+    gesture_click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    let term_for_rclick = terminal.clone();
+    gesture_click.connect_pressed(move |gesture, _n_press, _x, _y| {
+        term_for_rclick.copy_clipboard_format(vte4::Format::Text);
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    terminal.add_controller(gesture_click);
+
     // Ctrl+Shift+C = copy, Ctrl+Shift+V = paste
     let key_ctrl = gtk::EventControllerKey::new();
     let term_for_keys = terminal.clone();
