@@ -1,5 +1,7 @@
+use std::path::Path;
+
 use ssh_key::private::{Ed25519Keypair, EcdsaKeypair, KeypairData};
-use ssh_key::{EcdsaCurve, HashAlg, LineEnding, PrivateKey};
+use ssh_key::{Algorithm, EcdsaCurve, HashAlg, LineEnding, PrivateKey};
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -72,4 +74,61 @@ pub fn generate_keypair(
     };
 
     Ok(meta)
+}
+
+pub fn import_keypair(
+    name: &str,
+    private_key_path: &Path,
+    public_key_path: &Path,
+) -> Result<KeyPairMeta, AppError> {
+    let private_key_data = std::fs::read_to_string(private_key_path)?;
+    let public_key_data = std::fs::read_to_string(public_key_path)?;
+
+    // Try to parse the private key without a passphrase to detect algorithm
+    // If it's encrypted, from_openssh will fail, so we try the public key instead
+    let (algorithm, has_passphrase) = match PrivateKey::from_openssh(&private_key_data) {
+        Ok(pk) => (map_algorithm(pk.algorithm()), false),
+        Err(_) => {
+            // Key is likely encrypted — parse public key to detect algorithm
+            let pub_key = ssh_key::PublicKey::from_openssh(&public_key_data)
+                .map_err(|e| AppError::KeyGen(format!("Invalid public key: {e}")))?;
+            (map_algorithm(pub_key.algorithm()), true)
+        }
+    };
+
+    let pub_key = ssh_key::PublicKey::from_openssh(&public_key_data)
+        .map_err(|e| AppError::KeyGen(format!("Invalid public key: {e}")))?;
+    let fingerprint = pub_key.fingerprint(HashAlg::Sha256).to_string();
+
+    let id = Uuid::new_v4();
+    KeyStore::write_key_files(&id, &private_key_data, &public_key_data)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let meta = KeyPairMeta {
+        id,
+        name: name.to_string(),
+        algorithm,
+        public_key_fingerprint: fingerprint,
+        created_at: now,
+        private_key_filename: format!("{}.key", id),
+        public_key_filename: format!("{}.pub", id),
+        has_passphrase,
+    };
+
+    Ok(meta)
+}
+
+fn map_algorithm(algo: Algorithm) -> KeyAlgorithm {
+    match algo {
+        Algorithm::Ed25519 => KeyAlgorithm::Ed25519,
+        Algorithm::Ecdsa { curve: EcdsaCurve::NistP256 } => KeyAlgorithm::EcdsaNistP256,
+        Algorithm::Rsa { hash: Some(ssh_key::HashAlg::Sha256) } => KeyAlgorithm::RsaSha2_256,
+        Algorithm::Rsa { hash: Some(ssh_key::HashAlg::Sha512) } => KeyAlgorithm::RsaSha2_512,
+        Algorithm::Rsa { .. } => KeyAlgorithm::Rsa,
+        _ => KeyAlgorithm::Ed25519, // fallback
+    }
 }

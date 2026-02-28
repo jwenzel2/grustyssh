@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::app::SharedState;
-use crate::keys::generate::generate_keypair;
+use crate::keys::generate::{generate_keypair, import_keypair};
 use crate::keys::storage::KeyStore;
 use crate::models::connection::KeyAlgorithm;
 
@@ -75,6 +75,107 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
 
     content_box.append(&gen_group);
     content_box.append(&generate_btn);
+
+    // Import existing key section
+    let import_group = adw::PreferencesGroup::builder()
+        .title("Import Existing Key")
+        .build();
+
+    let import_name_row = adw::EntryRow::builder()
+        .title("Key Name")
+        .build();
+    import_group.add(&import_name_row);
+
+    let import_private_row = adw::ActionRow::builder()
+        .title("Private Key File")
+        .subtitle("No file selected")
+        .build();
+    let import_private_btn = gtk::Button::builder()
+        .icon_name("document-open-symbolic")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    import_private_row.add_suffix(&import_private_btn);
+    import_private_row.set_activatable_widget(Some(&import_private_btn));
+    import_group.add(&import_private_row);
+
+    let import_public_row = adw::ActionRow::builder()
+        .title("Public Key File")
+        .subtitle("No file selected")
+        .build();
+    let import_public_btn = gtk::Button::builder()
+        .icon_name("document-open-symbolic")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    import_public_row.add_suffix(&import_public_btn);
+    import_public_row.set_activatable_widget(Some(&import_public_btn));
+    import_group.add(&import_public_row);
+
+    let import_btn = gtk::Button::builder()
+        .label("Import Key")
+        .css_classes(["suggested-action"])
+        .halign(gtk::Align::End)
+        .margin_top(8)
+        .build();
+
+    let import_private_path: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
+    let import_public_path: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::new(RefCell::new(None));
+
+    // Private key file chooser
+    {
+        let path_ref = import_private_path.clone();
+        let row = import_private_row.clone();
+        let parent_ref = parent.clone();
+        import_private_btn.connect_clicked(move |_| {
+            let path_ref = path_ref.clone();
+            let row = row.clone();
+            let file_dialog = gtk::FileDialog::builder()
+                .title("Select Private Key File")
+                .build();
+            file_dialog.open(
+                Some(&parent_ref),
+                gtk::gio::Cancellable::NONE,
+                move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            row.set_subtitle(&path.display().to_string());
+                            *path_ref.borrow_mut() = Some(path);
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    // Public key file chooser
+    {
+        let path_ref = import_public_path.clone();
+        let row = import_public_row.clone();
+        let parent_ref = parent.clone();
+        import_public_btn.connect_clicked(move |_| {
+            let path_ref = path_ref.clone();
+            let row = row.clone();
+            let file_dialog = gtk::FileDialog::builder()
+                .title("Select Public Key File")
+                .build();
+            file_dialog.open(
+                Some(&parent_ref),
+                gtk::gio::Cancellable::NONE,
+                move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            row.set_subtitle(&path.display().to_string());
+                            *path_ref.borrow_mut() = Some(path);
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    content_box.append(&import_group);
+    content_box.append(&import_btn);
 
     // Existing keys section
     let keys_group = adw::PreferencesGroup::builder()
@@ -234,6 +335,78 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
             }
         }
     });
+
+    // Enter key in import name row triggers import
+    {
+        let btn = import_btn.clone();
+        import_name_row.connect_entry_activated(move |_| { btn.emit_clicked(); });
+    }
+
+    // Import button handler
+    {
+        let state_for_import = state.clone();
+        let import_name_row = import_name_row.clone();
+        let import_private_path = import_private_path.clone();
+        let import_public_path = import_public_path.clone();
+        let import_private_row = import_private_row.clone();
+        let import_public_row = import_public_row.clone();
+        let rebuild = rebuild_key_list.clone();
+        let parent_ref = parent.clone();
+        import_btn.connect_clicked(move |_| {
+            let name = import_name_row.text().to_string();
+            if name.is_empty() {
+                let alert = adw::AlertDialog::builder()
+                    .heading("Missing Name")
+                    .body("Please enter a name for the key.")
+                    .build();
+                alert.add_response("ok", "OK");
+                alert.present(Some(&parent_ref));
+                return;
+            }
+            let priv_path = import_private_path.borrow().clone();
+            let pub_path = import_public_path.borrow().clone();
+            if priv_path.is_none() || pub_path.is_none() {
+                let alert = adw::AlertDialog::builder()
+                    .heading("Missing Files")
+                    .body("Please select both private and public key files.")
+                    .build();
+                alert.add_response("ok", "OK");
+                alert.present(Some(&parent_ref));
+                return;
+            }
+            match import_keypair(&name, &priv_path.unwrap(), &pub_path.unwrap()) {
+                Ok(meta) => {
+                    let algo_name = meta.algorithm.to_string();
+                    let mut store = state_for_import.key_store.lock().unwrap();
+                    if let Err(e) = store.add(meta) {
+                        log::error!("Failed to save imported key: {e}");
+                    }
+                    drop(store);
+                    import_name_row.set_text("");
+                    import_private_row.set_subtitle("No file selected");
+                    import_public_row.set_subtitle("No file selected");
+                    *import_private_path.borrow_mut() = None;
+                    *import_public_path.borrow_mut() = None;
+                    rebuild();
+                    let alert = adw::AlertDialog::builder()
+                        .heading("Key Imported")
+                        .body(format!("Successfully imported {algo_name} key \"{name}\"."))
+                        .build();
+                    alert.add_response("ok", "OK");
+                    alert.present(Some(&parent_ref));
+                }
+                Err(e) => {
+                    log::error!("Key import failed: {e}");
+                    let alert = adw::AlertDialog::builder()
+                        .heading("Import Failed")
+                        .body(format!("{e}"))
+                        .build();
+                    alert.add_response("ok", "OK");
+                    alert.present(Some(&parent_ref));
+                }
+            }
+        });
+    }
 
     // Backup button handler
     let state_for_backup = state.clone();
