@@ -160,14 +160,12 @@ pub fn create_sftp_tab(
         let remote_list_download = remote_pane.listbox.clone();
         let remote_path_download = remote_path.clone();
         let local_state_download = local_state.clone();
-        let local_pane_refresh = local_pane.clone();
         let cmd_tx_download = cmd_tx_rc.clone();
         Rc::new(move || {
             download_selected_remote_entry(
                 &remote_list_download,
                 remote_path_download.clone(),
                 local_state_download.clone(),
-                local_pane_refresh.clone(),
                 cmd_tx_download.clone(),
             );
         })
@@ -451,6 +449,8 @@ pub fn create_sftp_tab(
     let delete_btn_c = delete_btn.clone();
     let remote_connected_c = remote_connected.clone();
     let local_list_events = local_pane.listbox.clone();
+    let local_pane_events = local_pane.clone();
+    let local_state_events = local_state.clone();
     let conflict_anchor = main_box.clone();
     glib::spawn_future_local(async move {
         while let Ok(event) = event_rx.recv().await {
@@ -495,6 +495,15 @@ pub fn create_sftp_tab(
                 }
                 SftpEvent::TransferComplete { name } => {
                     transfer_label_c.set_label(&format!("{name}: complete"));
+                    // Refresh local pane
+                    let path = local_state_events.borrow().current_path.clone();
+                    refresh_local_listing(&local_pane_events, &path);
+                    // Refresh remote pane
+                    let rp = remote_path_events.borrow().clone();
+                    let tx = (*cmd_tx_rc).clone();
+                    glib::spawn_future_local(async move {
+                        let _ = tx.send(SftpCommand::ListDir(rp)).await;
+                    });
                 }
                 SftpEvent::TransferConflict {
                     path,
@@ -544,6 +553,7 @@ struct PaneWidgets {
     listbox: gtk::ListBox,
     up_btn: gtk::Button,
     home_btn: gtk::Button,
+    new_folder_btn: gtk::Button,
     refresh_btn: gtk::Button,
 }
 
@@ -583,6 +593,12 @@ fn build_local_pane(state: Rc<RefCell<LocalPaneState>>) -> PaneWidgets {
         .css_classes(["flat"])
         .build();
 
+    let new_folder_btn = gtk::Button::builder()
+        .icon_name("folder-new-symbolic")
+        .tooltip_text("New folder")
+        .css_classes(["flat"])
+        .build();
+
     let refresh_btn = gtk::Button::builder()
         .icon_name("view-refresh-symbolic")
         .tooltip_text("Refresh")
@@ -597,6 +613,7 @@ fn build_local_pane(state: Rc<RefCell<LocalPaneState>>) -> PaneWidgets {
 
     nav_bar.append(&up_btn);
     nav_bar.append(&home_btn);
+    nav_bar.append(&new_folder_btn);
     nav_bar.append(&refresh_btn);
     nav_bar.append(&path_entry);
     container.append(&nav_bar);
@@ -619,6 +636,7 @@ fn build_local_pane(state: Rc<RefCell<LocalPaneState>>) -> PaneWidgets {
         listbox,
         up_btn,
         home_btn,
+        new_folder_btn,
         refresh_btn,
     };
 
@@ -668,6 +686,12 @@ fn build_remote_pane(
         .css_classes(["flat"])
         .build();
 
+    let new_folder_btn = gtk::Button::builder()
+        .icon_name("folder-new-symbolic")
+        .tooltip_text("New folder")
+        .css_classes(["flat"])
+        .build();
+
     let refresh_btn = gtk::Button::builder()
         .icon_name("view-refresh-symbolic")
         .tooltip_text("Refresh")
@@ -682,6 +706,7 @@ fn build_remote_pane(
 
     nav_bar.append(&up_btn);
     nav_bar.append(&home_btn);
+    nav_bar.append(&new_folder_btn);
     nav_bar.append(&refresh_btn);
     nav_bar.append(&path_entry);
     container.append(&nav_bar);
@@ -713,6 +738,7 @@ fn build_remote_pane(
         listbox,
         up_btn,
         home_btn,
+        new_folder_btn,
         refresh_btn,
     }
 }
@@ -901,20 +927,32 @@ fn prompt_transfer_conflict_dialog(
     response_tx: async_channel::Sender<SftpConflictResponse>,
 ) {
     let item_type = if is_dir { "folder" } else { "file" };
-    let transfer_direction = match direction {
-        SftpConflictDirection::Upload => "uploading to remote",
-        SftpConflictDirection::Download => "downloading to local",
+    let (heading, body, keep_label, replace_label) = match direction {
+        SftpConflictDirection::Download => (
+            "Download Conflict",
+            format!(
+                "A local {item_type} already exists:\n{path}\n\nThe remote file will overwrite the local copy if you choose to replace."
+            ),
+            "Keep Local",
+            "Replace Local",
+        ),
+        SftpConflictDirection::Upload => (
+            "Upload Conflict",
+            format!(
+                "A remote {item_type} already exists:\n{path}\n\nThe local file will overwrite the remote copy if you choose to replace."
+            ),
+            "Keep Remote",
+            "Replace Remote",
+        ),
     };
 
     let dialog = adw::AlertDialog::builder()
-        .heading("Conflict Detected")
-        .body(&format!(
-            "A {item_type} already exists while {transfer_direction}:\n{path}\n\nChoose which version to keep."
-        ))
+        .heading(heading)
+        .body(&body)
         .build();
 
-    dialog.add_response("keep", "Keep Existing");
-    dialog.add_response("replace", "Keep Incoming");
+    dialog.add_response("keep", keep_label);
+    dialog.add_response("replace", replace_label);
     dialog.set_response_appearance("replace", adw::ResponseAppearance::Destructive);
     dialog.set_default_response(Some("keep"));
 
@@ -994,6 +1032,42 @@ fn prompt_rename_dialog(
     }
 }
 
+fn prompt_new_folder_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    on_submit: impl FnOnce(String) + 'static,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading("New Folder")
+        .body("Enter a name for the new folder")
+        .build();
+
+    let entry = gtk::Entry::builder()
+        .text("New Folder")
+        .build();
+    entry.select_region(0, -1);
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("create", "Create");
+    dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("create"));
+
+    let on_submit = RefCell::new(Some(on_submit));
+    let entry_response = entry.clone();
+    dialog.connect_response(None, move |_dialog, response| {
+        if response == "create" {
+            if let Some(callback) = on_submit.borrow_mut().take() {
+                callback(entry_response.text().to_string());
+            }
+        }
+    });
+
+    if let Some(root) = anchor.as_ref().root() {
+        if let Ok(window) = root.downcast::<gtk::Window>() {
+            dialog.present(Some(&window));
+        }
+    }
+}
+
 fn rename_selected_local_entry(
     local_list: &gtk::ListBox,
     local_state: Rc<RefCell<LocalPaneState>>,
@@ -1052,13 +1126,11 @@ fn upload_selected_local_entry(
     let rpath = remote_path.borrow().clone();
     let remote = join_remote_path(&rpath, &name);
     let tx = (*cmd_tx).clone();
-    let tx_refresh = (*cmd_tx).clone();
     glib::spawn_future_local(async move {
         let _ = tx.send(SftpCommand::Upload {
             local: local_path,
             remote,
         }).await;
-        let _ = tx_refresh.send(SftpCommand::ListDir(rpath)).await;
     });
 }
 
@@ -1115,7 +1187,6 @@ fn download_selected_remote_entry(
     remote_list: &gtk::ListBox,
     remote_path: Rc<RefCell<String>>,
     local_state: Rc<RefCell<LocalPaneState>>,
-    local_pane: PaneWidgets,
     cmd_tx: Rc<async_channel::Sender<SftpCommand>>,
 ) {
     if !can_download_selected_remote_entries(remote_list) {
@@ -1129,8 +1200,6 @@ fn download_selected_remote_entry(
     let rpath = remote_path.borrow().clone();
     let local = local_state.borrow().current_path.clone();
     let tx = (*cmd_tx).clone();
-    let ls = local_state.clone();
-    let lp = local_pane.clone();
     glib::spawn_future_local(async move {
         for name in selected_names {
             let remote = join_remote_path(&rpath, &name);
@@ -1139,9 +1208,6 @@ fn download_selected_remote_entry(
                 local: local.clone(),
             }).await;
         }
-        glib::timeout_future(std::time::Duration::from_millis(500)).await;
-        let path = ls.borrow().current_path.clone();
-        refresh_local_listing(&lp, &path);
     });
 }
 
@@ -1252,6 +1318,28 @@ fn wire_local_navigation(pane: &PaneWidgets, state: Rc<RefCell<LocalPaneState>>)
         refresh_local_listing(&pane_home, &home);
     });
 
+    // New folder button
+    let state_newfolder = state.clone();
+    let pane_newfolder = pane.clone();
+    pane.new_folder_btn.connect_clicked(move |btn| {
+        let state_inner = state_newfolder.clone();
+        let pane_inner = pane_newfolder.clone();
+        prompt_new_folder_dialog(btn, move |name| {
+            let trimmed = name.trim().to_string();
+            if trimmed.is_empty() {
+                return;
+            }
+            let dir = state_inner.borrow().current_path.join(&trimmed);
+            match std::fs::create_dir(&dir) {
+                Ok(_) => {
+                    let path = state_inner.borrow().current_path.clone();
+                    refresh_local_listing(&pane_inner, &path);
+                }
+                Err(_) => {}
+            }
+        });
+    });
+
     // Refresh button
     let state_refresh = state.clone();
     let pane_refresh = pane.clone();
@@ -1322,6 +1410,27 @@ fn wire_remote_navigation(
         let tx = (*cmd_tx_home).clone();
         glib::spawn_future_local(async move {
             let _ = tx.send(SftpCommand::ListDir(".".to_string())).await;
+        });
+    });
+
+    // New folder button
+    let remote_path_newfolder = remote_path.clone();
+    let cmd_tx_newfolder = cmd_tx.clone();
+    pane.new_folder_btn.connect_clicked(move |btn| {
+        let rp = remote_path_newfolder.clone();
+        let tx_rc = cmd_tx_newfolder.clone();
+        prompt_new_folder_dialog(btn, move |name| {
+            let trimmed = name.trim().to_string();
+            if trimmed.is_empty() {
+                return;
+            }
+            let current = rp.borrow().clone();
+            let new_dir = join_remote_path(&current, &trimmed);
+            let tx = (*tx_rc).clone();
+            glib::spawn_future_local(async move {
+                let _ = tx.send(SftpCommand::MkDir(new_dir)).await;
+                let _ = tx.send(SftpCommand::ListDir(current)).await;
+            });
         });
     });
 
