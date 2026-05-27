@@ -105,8 +105,14 @@ pub fn show_connection_dialog(
         *key_ids.borrow_mut() = ids;
     }
 
+    let cloudflare_row = adw::SwitchRow::builder()
+        .title("Via Cloudflare Tunnel")
+        .subtitle("Route SSH through cloudflared access ssh")
+        .build();
+
     auth_group.add(&auth_method_row);
     auth_group.add(&key_row);
+    auth_group.add(&cloudflare_row);
     content_box.append(&auth_group);
 
     // Grey out key row when Password is selected, since it's not needed.
@@ -180,6 +186,7 @@ pub fn show_connection_dialog(
             }
         }
 
+        cloudflare_row.set_active(profile.use_cloudflare_tunnel);
         *tunnels.borrow_mut() = profile.tunnels.clone();
         profile_id = profile.id;
         created_at = profile.created_at;
@@ -293,6 +300,7 @@ pub fn show_connection_dialog(
             username,
             auth_method,
             key_pair_id,
+            use_cloudflare_tunnel: cloudflare_row.is_active(),
             tunnels: tunnels_clone.borrow().clone(),
             created_at,
             updated_at: now,

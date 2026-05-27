@@ -408,56 +408,80 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
         });
     }
 
-    // Backup button handler
+    // Backup button handler (encrypted)
     let state_for_backup = state.clone();
     let parent_for_backup = parent.clone();
     backup_btn.connect_clicked(move |_| {
-        let backup_json = {
-            let store = state_for_backup.key_store.lock().unwrap();
-            store.export_backup()
-        };
-        match backup_json {
-            Ok(json) => {
-                let file_dialog = gtk::FileDialog::builder()
-                    .title("Save Key Backup")
-                    .initial_name("grustyssh-keys-backup.json")
-                    .build();
-                let parent_clone = parent_for_backup.clone();
-                file_dialog.save(
-                    Some(&parent_for_backup),
-                    gtk::gio::Cancellable::NONE,
-                    move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                if let Err(e) = std::fs::write(&path, &json) {
-                                    log::error!("Failed to write backup: {e}");
-                                } else {
-                                    let alert = adw::AlertDialog::builder()
-                                        .heading("Backup Saved")
-                                        .body(format!("Keys backed up to {}", path.display()))
-                                        .build();
-                                    alert.add_response("ok", "OK");
-                                    alert.present(Some(&parent_clone));
+        let state_ref = state_for_backup.clone();
+        let parent_ref = parent_for_backup.clone();
+        let parent_for_closure = parent_ref.clone();
+        prompt_passphrase("Set a passphrase to encrypt the backup", &parent_ref, move |passphrase| {
+            let parent_ref = parent_for_closure;
+            let passphrase = match passphrase {
+                Some(p) => p,
+                None => {
+                    log::warn!("Key backup cancelled — passphrase required");
+                    return;
+                }
+            };
+            let backup_data = {
+                let store = state_ref.key_store.lock().unwrap();
+                store.export_encrypted_backup(&passphrase)
+            };
+            match backup_data {
+                Ok(data) => {
+                    let filter = gtk::FileFilter::new();
+                    filter.add_pattern("*.enc");
+                    filter.set_name(Some("Encrypted Backup Files"));
+                    let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+                    filters.append(&filter);
+
+                    let file_dialog = gtk::FileDialog::builder()
+                        .title("Save Encrypted Key Backup")
+                        .initial_name("grustyssh-keys-backup.enc")
+                        .filters(&filters)
+                        .build();
+                    let parent_clone = parent_ref.clone();
+                    file_dialog.save(
+                        Some(&parent_ref),
+                        gtk::gio::Cancellable::NONE,
+                        move |result| {
+                            if let Ok(file) = result {
+                                if let Some(path) = file.path() {
+                                    if let Err(e) = std::fs::write(&path, &data) {
+                                        log::error!("Failed to write backup: {e}");
+                                    } else {
+                                        let alert = adw::AlertDialog::builder()
+                                            .heading("Backup Saved")
+                                            .body(format!("Keys backed up to {}", path.display()))
+                                            .build();
+                                        alert.add_response("ok", "OK");
+                                        alert.present(Some(&parent_clone));
+                                    }
                                 }
                             }
-                        }
-                    },
-                );
+                        },
+                    );
+                }
+                Err(e) => log::error!("Failed to export keys: {e}"),
             }
-            Err(e) => log::error!("Failed to export keys: {e}"),
-        }
+        });
     });
 
-    // Restore button handler
+    // Restore button handler (supports .enc encrypted and .json legacy)
     let state_for_restore = state.clone();
     let parent_for_restore = parent.clone();
     let rebuild_for_restore = rebuild_key_list.clone();
     restore_btn.connect_clicked(move |_| {
-        let filter = gtk::FileFilter::new();
-        filter.add_pattern("*.json");
-        filter.set_name(Some("JSON Backup Files"));
+        let filter_enc = gtk::FileFilter::new();
+        filter_enc.add_pattern("*.enc");
+        filter_enc.set_name(Some("Encrypted Backup Files"));
+        let filter_json = gtk::FileFilter::new();
+        filter_json.add_pattern("*.json");
+        filter_json.set_name(Some("JSON Backup Files (legacy)"));
         let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
-        filters.append(&filter);
+        filters.append(&filter_enc);
+        filters.append(&filter_json);
 
         let file_dialog = gtk::FileDialog::builder()
             .title("Restore Keys from Backup")
@@ -473,39 +497,118 @@ pub fn show_key_manager_dialog(parent: &adw::ApplicationWindow, state: &SharedSt
             move |result| {
                 if let Ok(file) = result {
                     if let Some(path) = file.path() {
-                        match std::fs::read_to_string(&path) {
-                            Ok(json) => {
-                                let import_result = {
-                                    let mut store = state_clone.key_store.lock().unwrap();
-                                    store.import_backup(&json)
-                                };
-                                match import_result {
-                                    Ok(count) => {
-                                        rebuild();
-                                        let alert = adw::AlertDialog::builder()
-                                            .heading("Restore Complete")
-                                            .body(format!("Imported {count} key(s)."))
-                                            .build();
-                                        alert.add_response("ok", "OK");
-                                        alert.present(Some(&parent_clone));
-                                    }
-                                    Err(e) => {
-                                        log::error!("Failed to import backup: {e}");
-                                        let alert = adw::AlertDialog::builder()
-                                            .heading("Restore Failed")
-                                            .body(format!("{e}"))
-                                            .build();
-                                        alert.add_response("ok", "OK");
-                                        alert.present(Some(&parent_clone));
+                        let is_json = path.extension().and_then(|e| e.to_str()) == Some("json");
+                        if is_json {
+                            match std::fs::read_to_string(&path) {
+                                Ok(json) => {
+                                    let import_result = {
+                                        let mut store = state_clone.key_store.lock().unwrap();
+                                        store.import_backup(&json)
+                                    };
+                                    match import_result {
+                                        Ok(count) => {
+                                            rebuild();
+                                            let alert = adw::AlertDialog::builder()
+                                                .heading("Restore Complete")
+                                                .body(format!("Imported {count} key(s)."))
+                                                .build();
+                                            alert.add_response("ok", "OK");
+                                            alert.present(Some(&parent_clone));
+                                        }
+                                        Err(e) => {
+                                            log::error!("Failed to import backup: {e}");
+                                            let alert = adw::AlertDialog::builder()
+                                                .heading("Restore Failed")
+                                                .body(format!("{e}"))
+                                                .build();
+                                            alert.add_response("ok", "OK");
+                                            alert.present(Some(&parent_clone));
+                                        }
                                     }
                                 }
+                                Err(e) => log::error!("Failed to read backup file: {e}"),
                             }
-                            Err(e) => log::error!("Failed to read backup file: {e}"),
+                        } else {
+                            match std::fs::read(&path) {
+                                Ok(data) => {
+                                    let state_for_enc = state_clone.clone();
+                                    let parent_for_enc = parent_clone.clone();
+                                    let rebuild_for_enc = rebuild.clone();
+                                    prompt_passphrase("Enter the backup passphrase", &parent_clone, move |passphrase| {
+                                        let passphrase = match passphrase {
+                                            Some(p) => p,
+                                            None => {
+                                                log::warn!("Key restore cancelled — passphrase required");
+                                                return;
+                                            }
+                                        };
+                                        let import_result = {
+                                            let mut store = state_for_enc.key_store.lock().unwrap();
+                                            store.import_encrypted_backup(&data, &passphrase)
+                                        };
+                                        match import_result {
+                                            Ok(count) => {
+                                                rebuild_for_enc();
+                                                let alert = adw::AlertDialog::builder()
+                                                    .heading("Restore Complete")
+                                                    .body(format!("Imported {count} key(s)."))
+                                                    .build();
+                                                alert.add_response("ok", "OK");
+                                                alert.present(Some(&parent_for_enc));
+                                            }
+                                            Err(e) => {
+                                                log::error!("Failed to import backup: {e}");
+                                                let alert = adw::AlertDialog::builder()
+                                                    .heading("Restore Failed")
+                                                    .body(format!("{e}"))
+                                                    .build();
+                                                alert.add_response("ok", "OK");
+                                                alert.present(Some(&parent_for_enc));
+                                            }
+                                        }
+                                    });
+                                }
+                                Err(e) => log::error!("Failed to read backup file: {e}"),
+                            }
                         }
                     }
                 }
             },
         );
+    });
+
+    dialog.present(Some(parent));
+}
+
+fn prompt_passphrase<F>(heading: &str, parent: &adw::ApplicationWindow, on_done: F)
+where
+    F: FnOnce(Option<String>) + 'static,
+{
+    let entry = gtk::PasswordEntry::builder()
+        .activates_default(true)
+        .build();
+
+    let dialog = adw::AlertDialog::builder()
+        .heading(heading)
+        .build();
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("ok", "OK");
+    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("cancel");
+
+    let entry_clone = entry.clone();
+    let on_done = std::cell::RefCell::new(Some(on_done));
+    dialog.connect_response(None, move |_dlg, response| {
+        if let Some(cb) = on_done.borrow_mut().take() {
+            if response == "ok" {
+                let pass = entry_clone.text().to_string();
+                cb(if pass.is_empty() { None } else { Some(pass) });
+            } else {
+                cb(None);
+            }
+        }
     });
 
     dialog.present(Some(parent));

@@ -1,6 +1,6 @@
 [package]
 name = "grustyssh"
-version = "1.9.0"
+version = "2.0.0"
 edition = "2021"
 description = "A GTK4/libadwaita SSH client with tabbed terminals"
 
@@ -24,6 +24,11 @@ async-trait = "0.1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Crypto (encrypted key backups)
+aes-gcm = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
 
 # Utilities
 directories = "6"

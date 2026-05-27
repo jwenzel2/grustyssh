@@ -92,7 +92,7 @@ async fn run_sftp_session(
     // We need a separate event channel for the SSH layer (we ignore its events)
     let (ssh_event_tx, _ssh_event_rx) = async_channel::bounded::<SshEvent>(16);
 
-    let session = establish_session(
+    let session_conn = establish_session(
         &profile,
         password.as_ref(),
         key_passphrase.as_ref(),
@@ -100,8 +100,10 @@ async fn run_sftp_session(
     )
     .await?;
 
+    let _cloudflared = session_conn.cloudflared;
+
     // Open SFTP subsystem
-    let channel = session
+    let channel = session_conn.handle
         .channel_open_session()
         .await
         .map_err(|e| AppError::Connection(format!("Failed to open channel: {e}")))?;
