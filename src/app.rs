@@ -3,8 +3,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::config::Settings;
-use crate::models::tunnel::TunnelConfig;
 use crate::keys::storage::KeyStore;
+use crate::models::tunnel::TunnelConfig;
 use crate::storage::profiles::ProfileStore;
 
 /// Commands sent from GTK UI thread to Tokio SSH task
@@ -20,6 +20,7 @@ pub enum SshCommand {
 /// Events sent from Tokio SSH task to GTK UI thread
 #[derive(Debug, Clone)]
 pub enum SshEvent {
+    Status(String),
     Connected,
     Data(Vec<u8>),
     TunnelEstablished(Uuid),

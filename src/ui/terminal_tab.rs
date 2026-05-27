@@ -1,6 +1,5 @@
-use gtk4 as gtk;
-use gtk::prelude::*;
 use gtk::glib;
+use gtk4 as gtk;
 use libadwaita as adw;
 use vte4::prelude::*;
 use zeroize::Zeroizing;
@@ -53,8 +52,7 @@ pub fn create_terminal_tab(
     let key_ctrl = gtk::EventControllerKey::new();
     let term_for_keys = terminal.clone();
     key_ctrl.connect_key_pressed(move |_, keyval, _keycode, modifiers| {
-        let ctrl_shift = gtk::gdk::ModifierType::CONTROL_MASK
-            | gtk::gdk::ModifierType::SHIFT_MASK;
+        let ctrl_shift = gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK;
         if modifiers.contains(ctrl_shift) {
             match keyval {
                 gtk::gdk::Key::C => {
@@ -129,6 +127,10 @@ pub fn create_terminal_tab(
     glib::spawn_future_local(async move {
         while let Ok(event) = event_rx.recv().await {
             match event {
+                SshEvent::Status(msg) => {
+                    let status_msg = format!("\r\n[{msg}]\r\n");
+                    terminal_clone.feed(status_msg.as_bytes());
+                }
                 SshEvent::Connected => {
                     log::info!("SSH session connected");
                     terminal_clone.grab_focus();
@@ -202,9 +204,7 @@ fn apply_terminal_settings(terminal: &vte4::Terminal, settings: &Settings) {
 pub fn disconnect_tab(page: &adw::TabPage) {
     // Retrieve the stored cmd_tx and send Disconnect
     unsafe {
-        if let Some(cmd_tx) =
-            page.data::<Rc<async_channel::Sender<SshCommand>>>("cmd_tx")
-        {
+        if let Some(cmd_tx) = page.data::<Rc<async_channel::Sender<SshCommand>>>("cmd_tx") {
             let tx = cmd_tx.as_ref().clone();
             let sender = (*tx).clone();
             glib::spawn_future_local(async move {

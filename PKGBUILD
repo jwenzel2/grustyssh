@@ -1,7 +1,7 @@
 # Maintainer: Jeremiah Wenzel <jwenzel2@github.com>
 pkgname=grustyssh
 pkgver=2.0.0
-pkgrel=1
+pkgrel=4
 pkgdesc='A GTK4/libadwaita SSH client with tabbed terminals'
 arch=('x86_64')
 url='https://github.com/jwenzel2/grustyssh'

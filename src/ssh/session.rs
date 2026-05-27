@@ -1,6 +1,6 @@
 use russh::client;
 use russh::client::KeyboardInteractiveAuthResponse;
-use russh::{ChannelMsg, Disconnect};
+use russh::{Channel, ChannelId, ChannelMsg, Disconnect};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use zeroize::Zeroizing;
 
 use crate::app::{SshCommand, SshEvent};
@@ -72,13 +73,24 @@ pub async fn establish_session(
     let handler = ClientHandler::new(event_tx.clone());
 
     let (mut session, cloudflared) = if profile.use_cloudflare_tunnel {
+        let _ = event_tx
+            .send(SshEvent::Status("Starting Cloudflare SSH tunnel".into()))
+            .await;
         let (stream, child) = connect_via_cloudflare_tunnel(profile)?;
+        let _ = event_tx
+            .send(SshEvent::Status(
+                "Connecting SSH transport through cloudflared".into(),
+            ))
+            .await;
         let session = client::connect_stream(config, stream, handler)
             .await
             .map_err(|e| AppError::Connection(e.to_string()))?;
         (session, Some(child))
     } else {
         let addr = format!("{}:{}", profile.hostname, profile.port);
+        let _ = event_tx
+            .send(SshEvent::Status(format!("Connecting to {addr}")))
+            .await;
         let session = client::connect(config, &addr, handler)
             .await
             .map_err(|e| AppError::Connection(e.to_string()))?;
@@ -86,13 +98,21 @@ pub async fn establish_session(
     };
 
     // Authenticate
+    let _ = event_tx
+        .send(SshEvent::Status("Authenticating".into()))
+        .await;
     let authenticated = match profile.auth_method {
         AuthMethod::Password => {
             let pw = password
                 .map(|p| p.as_str())
                 .ok_or_else(|| AppError::Auth("Password required".into()))?;
-            authenticate_password_or_keyboard_interactive(&mut session, &profile.username, pw)
-                .await?
+            authenticate_password_or_keyboard_interactive(
+                &mut session,
+                &profile.username,
+                pw,
+                &event_tx,
+            )
+            .await?
         }
         AuthMethod::PublicKey => {
             let key_id = profile
@@ -124,8 +144,13 @@ pub async fn establish_session(
                 let pw = password
                     .map(|p| p.as_str())
                     .ok_or_else(|| AppError::Auth("Password required for fallback".into()))?;
-                authenticate_password_or_keyboard_interactive(&mut session, &profile.username, pw)
-                    .await?
+                authenticate_password_or_keyboard_interactive(
+                    &mut session,
+                    &profile.username,
+                    pw,
+                    &event_tx,
+                )
+                .await?
             } else {
                 true
             }
@@ -135,6 +160,10 @@ pub async fn establish_session(
     if !authenticated {
         return Err(AppError::Auth("Authentication failed".into()));
     }
+
+    let _ = event_tx
+        .send(SshEvent::Status("Authentication succeeded".into()))
+        .await;
 
     Ok(SessionConnection {
         handle: session,
@@ -146,16 +175,50 @@ async fn authenticate_password_or_keyboard_interactive(
     session: &mut client::Handle<ClientHandler>,
     username: &str,
     password: &str,
+    event_tx: &async_channel::Sender<SshEvent>,
 ) -> Result<bool, AppError> {
-    if session
-        .authenticate_password(username, password)
-        .await
-        .map_err(|e| AppError::Auth(e.to_string()))?
-    {
-        return Ok(true);
+    let _ = event_tx
+        .send(SshEvent::Status(
+            "Trying keyboard-interactive authentication".into(),
+        ))
+        .await;
+
+    match authenticate_keyboard_interactive(session, username, password).await {
+        Ok(true) => return Ok(true),
+        Ok(false) => {
+            let _ = event_tx
+                .send(SshEvent::Status(
+                    "Keyboard-interactive authentication failed".into(),
+                ))
+                .await;
+        }
+        Err(e) => {
+            let _ = event_tx
+                .send(SshEvent::Status(format!(
+                    "Keyboard-interactive authentication did not complete: {e}"
+                )))
+                .await;
+        }
     }
 
-    authenticate_keyboard_interactive(session, username, password).await
+    let _ = event_tx
+        .send(SshEvent::Status("Trying password authentication".into()))
+        .await;
+
+    let password_result = timeout(
+        Duration::from_secs(20),
+        session.authenticate_password(username, password),
+    )
+    .await;
+
+    match password_result {
+        Ok(Ok(true)) => Ok(true),
+        Ok(Ok(false)) => Ok(false),
+        Ok(Err(e)) => Err(AppError::Auth(e.to_string())),
+        Err(_) => Err(AppError::Auth(
+            "Timed out during password authentication".into(),
+        )),
+    }
 }
 
 async fn authenticate_keyboard_interactive(
@@ -163,10 +226,13 @@ async fn authenticate_keyboard_interactive(
     username: &str,
     password: &str,
 ) -> Result<bool, AppError> {
-    let mut response = session
-        .authenticate_keyboard_interactive_start(username, None)
-        .await
-        .map_err(|e| AppError::Auth(e.to_string()))?;
+    let mut response = timeout(
+        Duration::from_secs(20),
+        session.authenticate_keyboard_interactive_start(username, None),
+    )
+    .await
+    .map_err(|_| AppError::Auth("Timed out starting keyboard-interactive authentication".into()))?
+    .map_err(|e| AppError::Auth(e.to_string()))?;
 
     loop {
         response = match response {
@@ -184,10 +250,15 @@ async fn authenticate_keyboard_interactive(
                     })
                     .collect();
 
-                session
-                    .authenticate_keyboard_interactive_respond(responses)
-                    .await
-                    .map_err(|e| AppError::Auth(e.to_string()))?
+                timeout(
+                    Duration::from_secs(20),
+                    session.authenticate_keyboard_interactive_respond(responses),
+                )
+                .await
+                .map_err(|_| {
+                    AppError::Auth("Timed out during keyboard-interactive authentication".into())
+                })?
+                .map_err(|e| AppError::Auth(e.to_string()))?
             }
         };
     }
@@ -235,23 +306,37 @@ async fn run_session(
     let session = session_conn.handle;
     let _cloudflared = session_conn.cloudflared;
 
-    let _ = event_tx.send(SshEvent::Connected).await;
-
     // Open a session channel with a PTY
-    let channel = session
+    let _ = event_tx
+        .send(SshEvent::Status("Opening session channel".into()))
+        .await;
+    let mut channel = session
         .channel_open_session()
         .await
         .map_err(|e| AppError::Connection(e.to_string()))?;
 
+    let _ = event_tx
+        .send(SshEvent::Status("Requesting PTY".into()))
+        .await;
     channel
-        .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+        .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
         .await
         .map_err(|e| AppError::Connection(e.to_string()))?;
+    wait_for_channel_request_reply(&mut channel, "PTY request", &event_tx).await?;
 
+    let _ = event_tx
+        .send(SshEvent::Status("Requesting shell".into()))
+        .await;
     channel
-        .request_shell(false)
+        .request_shell(true)
         .await
         .map_err(|e| AppError::Connection(e.to_string()))?;
+    wait_for_channel_request_reply(&mut channel, "shell request", &event_tx).await?;
+
+    let _ = event_tx
+        .send(SshEvent::Status("Shell started".into()))
+        .await;
+    let _ = event_tx.send(SshEvent::Connected).await;
 
     // Start enabled tunnels
     let session_handle = Arc::new(Mutex::new(session));
@@ -262,8 +347,6 @@ async fn run_session(
     }
 
     // Main data loop
-    let mut channel = channel;
-
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
@@ -298,6 +381,12 @@ async fn run_session(
                     Some(ChannelMsg::Data { data }) => {
                         let _ = event_tx.send(SshEvent::Data(data.to_vec())).await;
                     }
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        let _ = event_tx.send(SshEvent::Data(data.to_vec())).await;
+                    }
+                    Some(ChannelMsg::Failure) => {
+                        return Err(AppError::Connection("Remote channel request failed".into()));
+                    }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
                         log::info!("Remote process exited with status {exit_status}");
                     }
@@ -308,6 +397,53 @@ async fn run_session(
                     _ => {}
                 }
             }
+        }
+    }
+}
+
+async fn wait_for_channel_request_reply<M>(
+    channel: &mut Channel<M>,
+    request_name: &str,
+    event_tx: &async_channel::Sender<SshEvent>,
+) -> Result<(), AppError>
+where
+    M: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static,
+{
+    loop {
+        let msg = timeout(Duration::from_secs(10), channel.wait())
+            .await
+            .map_err(|_| AppError::Connection(format!("Timed out waiting for {request_name}")))?;
+
+        match msg {
+            Some(ChannelMsg::Success) => return Ok(()),
+            Some(ChannelMsg::Failure) => {
+                return Err(AppError::Connection(format!(
+                    "Remote rejected {request_name}"
+                )));
+            }
+            Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                let _ = event_tx.send(SshEvent::Data(data.to_vec())).await;
+            }
+            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                return Err(AppError::Connection(format!(
+                    "Remote closed the channel while waiting for {request_name}"
+                )));
+            }
+            Some(ChannelMsg::ExitStatus { exit_status }) => {
+                return Err(AppError::Connection(format!(
+                    "Remote exited with status {exit_status} while waiting for {request_name}"
+                )));
+            }
+            Some(ChannelMsg::ExitSignal {
+                signal_name,
+                error_message,
+                ..
+            }) => {
+                return Err(AppError::Connection(format!(
+                    "Remote exited from signal {signal_name:?} while waiting for {request_name}: {error_message}"
+                )));
+            }
+            _ => {}
         }
     }
 }
